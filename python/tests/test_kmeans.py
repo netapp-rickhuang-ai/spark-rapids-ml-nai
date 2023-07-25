@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2022-2023, NVIDIA CORPORATION.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +14,19 @@
 # limitations under the License.
 #
 
-from typing import List, Tuple, Type, TypeVar
+from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar
 
 import numpy as np
+import pyspark
 import pytest
+from _pytest.logging import LogCaptureFixture
+from packaging import version
+
+if version.parse(pyspark.__version__) < version.parse("3.4.0"):
+    from pyspark.sql.utils import IllegalArgumentException  # type: ignore
+else:
+    from pyspark.errors import IllegalArgumentException  # type: ignore
+
 from pyspark.ml.clustering import KMeans as SparkKMeans
 from pyspark.ml.clustering import KMeansModel as SparkKMeansModel
 from pyspark.ml.functions import array_to_vector
@@ -54,15 +63,59 @@ def assert_centers_equal(
         assert a_center == pytest.approx(b_center, tolerance)
 
 
-def test_default_cuml_params() -> None:
+@pytest.mark.parametrize("default_params", [True, False])
+def test_params(default_params: bool) -> None:
     from cuml import KMeans as CumlKMeans
+    from pyspark.ml.clustering import KMeans as SparkKMeans
 
-    cuml_params = get_default_cuml_parameters([CumlKMeans], ["handle", "output_type"])
-    spark_params = KMeans()._get_cuml_params_default()
-    assert cuml_params == spark_params
+    spark_params = {
+        param.name: value for param, value in SparkKMeans().extractParamMap().items()
+    }
+
+    cuml_params = get_default_cuml_parameters(
+        cuml_classes=[CumlKMeans], excludes=["handle", "output_type", "convert_dtype"]
+    )
+
+    # Ensure internal cuml defaults match actual cuml defaults
+    assert KMeans()._get_cuml_params_default() == cuml_params
+
+    # Our algorithm overrides the following cuml parameters with their spark defaults:
+    spark_default_overrides = {
+        "n_clusters": spark_params["k"],
+        "max_iter": spark_params["maxIter"],
+        "init": spark_params["initMode"],
+    }
+
+    cuml_params.update(spark_default_overrides)
+
+    if default_params:
+        kmeans = KMeans()
+        seed = kmeans.getSeed()  # get the random seed that Spark generates
+        spark_params["seed"] = seed
+        cuml_params["random_state"] = seed
+    else:
+        kmeans = KMeans(
+            k=10,
+            seed=42,
+        )
+        cuml_params["n_clusters"] = 10
+        cuml_params["random_state"] = 42
+        spark_params["k"] = 10
+        spark_params["seed"] = 42
+
+    # Ensure both Spark API params and internal cuml_params are set correctly
+    assert_params(kmeans, spark_params, cuml_params)
+    assert kmeans.cuml_params == cuml_params
+
+    # setter/getter
+    from .test_common_estimator import _test_input_setter_getter
+
+    _test_input_setter_getter(KMeans)
 
 
-def test_kmeans_params(gpu_number: int, tmp_path: str) -> None:
+def test_kmeans_params(
+    gpu_number: int, tmp_path: str, caplog: LogCaptureFixture
+) -> None:
     # Default constructor
     default_spark_params = {
         "initMode": "k-means||",
@@ -83,7 +136,7 @@ def test_kmeans_params(gpu_number: int, tmp_path: str) -> None:
     assert_params(default_kmeans, default_spark_params, default_cuml_params)
 
     # Spark Params constructor
-    spark_params = {"k": 10, "maxIter": 100}
+    spark_params: Dict[str, Any] = {"k": 10, "maxIter": 100}
     spark_kmeans = KMeans(**spark_params)
     expected_spark_params = default_spark_params.copy()
     expected_spark_params.update(spark_params)
@@ -92,7 +145,7 @@ def test_kmeans_params(gpu_number: int, tmp_path: str) -> None:
     assert_params(spark_kmeans, expected_spark_params, expected_cuml_params)
 
     # cuml_params constructor
-    cuml_params = {
+    cuml_params: Dict[str, Any] = {
         "n_clusters": 10,
         "max_iter": 100,
         "tol": 1e-1,
@@ -117,15 +170,38 @@ def test_kmeans_params(gpu_number: int, tmp_path: str) -> None:
     assert_params(loaded_kmeans, expected_spark_params, expected_cuml_params)
 
     # conflicting params
-    conflicting_params = {
+    conflicting_params: Dict[str, Any] = {
         "k": 2,
         "n_clusters": 10,
     }
     with pytest.raises(ValueError, match="set one or the other"):
         conflicting_kmeans = KMeans(**conflicting_params)
 
+    # make sure no warning when enabling float64 inputs
+    kmeans_float32 = KMeans(float32_inputs=False)
+    assert "float32_inputs to False" not in caplog.text
+    assert not kmeans_float32._float32_inputs
 
-def test_kmeans_basic(gpu_number: int, tmp_path: str) -> None:
+
+def test_kmeans_copy() -> None:
+    from .test_common_estimator import _test_est_copy
+
+    param_list: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]] = [
+        ({"k": 17}, {"n_clusters": 17}),
+        ({"initMode": "random"}, {"init": "random"}),
+        ({"tol": 0.0132}, {"tol": 0.0132}),
+        ({"maxIter": 27}, {"max_iter": 27}),
+        ({"seed": 11}, {"random_state": 11}),
+        ({"verbose": True}, {"verbose": True}),
+    ]
+
+    for pair in param_list:
+        _test_est_copy(KMeans, pair[0], pair[1])
+
+
+def test_kmeans_basic(
+    gpu_number: int, tmp_path: str, caplog: LogCaptureFixture
+) -> None:
     # reduce the number of GPUs for toy dataset to avoid empty partition
     gpu_number = min(gpu_number, 2)
     data = [[1.0, 1.0], [1.0, 2.0], [3.0, 2.0], [4.0, 3.0]]
@@ -136,14 +212,27 @@ def test_kmeans_basic(gpu_number: int, tmp_path: str) -> None:
             .map(lambda row: (row,))
             .toDF(["features"])
         )
-        kmeans = KMeans(num_workers=gpu_number, n_clusters=2).setFeaturesCol("features")
+        kmeans = (
+            KMeans(num_workers=gpu_number, n_clusters=2)
+            .setFeaturesCol("features")
+            .setSeed(0)
+        )
+
+        kmeans.setTol(0.0)
+
+        warn_msg = (
+            "tol=0 is not supported in cuml yet. "
+            + "It will be mapped to smallest positive float, i.e. numpy.finfo('float32').tiny."
+        )
+
+        assert warn_msg in caplog.text
 
         def assert_kmeans_model(model: KMeansModel) -> None:
             assert len(model.cluster_centers_) == 2
             sorted_centers = sorted(model.cluster_centers_, key=lambda p: p)
             assert sorted_centers[0] == pytest.approx([1.0, 1.5], 0.001)
             assert sorted_centers[1] == pytest.approx([3.5, 2.5], 0.001)
-            assert model.dtype == "float64"
+            assert model.dtype == "float32"
             assert model.n_cols == 2
 
         def assert_cuml_spark_model(
@@ -174,7 +263,7 @@ def test_kmeans_basic(gpu_number: int, tmp_path: str) -> None:
 
         # test transform function
         label_df = kmeans_model.transform(df)
-        assert "features" in label_df.columns
+        assert ["features", "prediction"] == sorted(label_df.columns)
 
         o_col = kmeans_model.getPredictionCol()
         labels = [row[o_col] for row in label_df.collect()]
@@ -213,6 +302,7 @@ def test_kmeans_numeric_type(gpu_number: int, data_type: str) -> None:
         kmeans.fit(df)
 
 
+@pytest.mark.xfail
 @pytest.mark.parametrize("feature_type", pyspark_supported_feature_types)
 @pytest.mark.parametrize("data_shape", [(1000, 20)], ids=idfn)
 @pytest.mark.parametrize("data_type", cuml_supported_data_types)
@@ -233,7 +323,9 @@ def test_kmeans(
 
     n_rows = data_shape[0]
     n_cols = data_shape[1]
-    n_clusters = 8
+    n_clusters = 4
+    tol = 1.0e-20
+    seed = 42  # This does not guarantee deterministic centers in 25.02.
     cluster_std = 1.0
     tolerance = 0.001
 
@@ -244,7 +336,11 @@ def test_kmeans(
     from cuml import KMeans as cuKMeans
 
     cuml_kmeans = cuKMeans(
-        n_clusters=n_clusters, output_type="numpy", tol=1.0e-20, verbose=7
+        n_clusters=n_clusters,
+        output_type="numpy",
+        tol=tol,
+        random_state=seed,
+        verbose=6,
     )
 
     import cudf
@@ -259,7 +355,7 @@ def test_kmeans(
         )
 
         kmeans = KMeans(
-            num_workers=gpu_number, n_clusters=n_clusters, verbose=7
+            num_workers=gpu_number, n_clusters=n_clusters, tol=tol, seed=seed, verbose=6
         ).setFeaturesCol(features_col)
 
         kmeans_model = kmeans.fit(df)
@@ -320,9 +416,17 @@ def test_kmeans_spark_compat(
         ]
         df = spark.createDataFrame(data, ["features", "weighCol"])
 
-        kmeans = _KMeans(k=2)
+        import pyspark
+        from packaging import version
+
+        if version.parse(pyspark.__version__) < version.parse("3.4.0"):
+            kmeans = _KMeans(k=2)
+        else:
+            kmeans = _KMeans(k=2, solver="auto", maxBlockSizeInMB=0)  # type: ignore # only spark >= 3.4 supports solver and maxblockSize
+
         kmeans.setSeed(1)
         kmeans.setMaxIter(10)
+        kmeans.setInitMode("k-means||")
         if isinstance(kmeans, SparkKMeans):
             kmeans.setWeightCol("weighCol")
         else:
@@ -332,6 +436,7 @@ def test_kmeans_spark_compat(
         assert kmeans.getMaxIter() == 10
         assert kmeans.getK() == 2
         assert kmeans.getSeed() == 1
+        assert kmeans.getInitMode() == "k-means||"
 
         kmeans.clear(kmeans.maxIter)
         assert kmeans.getMaxIter() == 20
@@ -392,3 +497,23 @@ def test_kmeans_spark_compat(
 
         assert model.transform(df).take(1) == model2.transform(df).take(1)
         # True
+
+
+def test_parameters_validation() -> None:
+    data = [
+        ([1.0, 2.0], 1.0),
+        ([3.0, 1.0], 0.0),
+    ]
+
+    with CleanSparkSession() as spark:
+        features_col = "features"
+        label_col = "label"
+        schema = features_col + " array<float>, " + label_col + " float"
+        df = spark.createDataFrame(data, schema=schema)
+        with pytest.raises(IllegalArgumentException, match="k given invalid value -1"):
+            KMeans(k=-1).fit(df)
+
+        with pytest.raises(
+            IllegalArgumentException, match="maxIter given invalid value -1"
+        ):
+            KMeans().setMaxIter(-1).fit(df)

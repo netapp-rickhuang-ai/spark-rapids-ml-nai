@@ -1,11 +1,27 @@
+# Copyright (c) 2024, NVIDIA CORPORATION.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import Dict, List, Tuple
 
 import argparse
+from io import StringIO
 import os
 import subprocess
 import sys
 from multiprocessing import Pool, cpu_count
-from pylint import epylint
+from pylint.lint import Run
+from pylint.reporters.text import TextReporter
 
 # This script is copied from dmlc/xgboost
 
@@ -14,7 +30,9 @@ PROJECT_ROOT = os.path.normpath(os.path.join(CURDIR, os.path.pardir))
 SRC_PATHS = [
     "src/spark_rapids_ml",
     "tests",
+    "tests_large",
     "benchmark",
+    "tests_no_import_change",
 ]
 
 
@@ -52,14 +70,16 @@ class PyLint:
         ]
 
     def run(self, path: str) -> Tuple[Dict, str, str]:
-        (pylint_stdout, pylint_stderr) = epylint.py_run(
-            " ".join([str(path)] + self.pylint_opts), return_std=True
-        )
-        emap = {}
-        err = pylint_stderr.read()
 
+        pylint_output = StringIO()
+        reporter = TextReporter(pylint_output)
+        Run([str(path)] + self.pylint_opts, reporter=reporter, exit=False)
+
+        emap = {}
+        err = ""
+        
         out = []
-        for line in pylint_stdout:
+        for line in pylint_output:
             out.append(line)
             key = line.split(":")[-1].split("(")[0].strip()
             if key not in self.pylint_cats:

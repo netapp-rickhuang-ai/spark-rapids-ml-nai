@@ -1,47 +1,37 @@
 ## Running notebooks on Databricks
 
 If you already have a Databricks account, you can run the example notebooks on a Databricks cluster, as follows:
-- Install the [databricks-cli](https://docs.databricks.com/dev-tools/cli/index.html).
+- Install the latest [databricks-cli](https://docs.databricks.com/dev-tools/cli/index.html).  Note that Databricks has deprecated the legacy python based cli in favor of a self contained executable. Make sure the new version is first on the executables PATH after installation.
 - Configure it with your workspace URL and an [access token](https://docs.databricks.com/dev-tools/api/latest/authentication.html).  For demonstration purposes, we will configure a new [connection profile](https://docs.databricks.com/dev-tools/cli/index.html#connection-profiles) named `spark-rapids-ml`.  If you already have a connection profile, just set the `PROFILE` environment variable accordingly and skip the configure step.
-  ```
+  ```bash
   export PROFILE=spark-rapids-ml
   databricks configure --token --profile ${PROFILE}
   ```
-- Create a zip file for the `spark-rapids-ml` package.
+- Copy the init scripts to your *workspace* (not DBFS) (ex. workspace directory: /Users/< databricks-user-name >/init_scripts).
+  ```bash
+  export WS_SAVE_DIR="/path/to/directory/in/workspace"
+  databricks workspace mkdirs ${WS_SAVE_DIR} --profile ${PROFILE}
+  databricks workspace import --format AUTO --file init-pip-cuda-11.8.sh ${WS_SAVE_DIR}/init-pip-cuda-11.8.sh --profile ${PROFILE}
   ```
-  cd spark-rapids-ml/python/src
-  zip -r spark_rapids_ml.zip spark_rapids_ml
-  ```
-- Copy the zip file to DBFS, setting `SAVE_DIR` to the directory of your choice.
-  ```"
-  export SAVE_DIR="/path/to/save/artifacts"
-  databricks fs cp spark_rapids_ml.zip dbfs:${SAVE_DIR}/spark_rapids_ml.zip --profile ${PROFILE}
-  ```
-- Edit the [init-pip-cuda-11.8.sh](init-pip-cuda-11.8.sh) init script to set the `SPARK_RAPIDS_ML_ZIP` variable to the DBFS location used above.
-  ```
-  cd spark-rapids-ml/notebooks/databricks
-  sed -i"" -e "s;/path/to/zip/file;${SAVE_DIR}/spark_rapids_ml.zip;" init-pip-cuda-11.8.sh
-  ```
-  **Note**: the `databricks` CLI requires the `dbfs:` prefix for all DBFS paths, but inside the spark nodes, DBFS will be mounted to a local `/dbfs` volume, so the path prefixes will be slightly different depending on the context.
-
-  **Note**: this init script does the following on each Spark node:
+  **Note**: the init script does the following on each Spark node:
   - updates the CUDA runtime to 11.8 (required for Spark Rapids ML dependencies).
   - downloads and installs the [Spark-Rapids](https://github.com/NVIDIA/spark-rapids) plugin for accelerating data loading and Spark SQL.
   - installs various `cuXX` dependencies via pip.
-- Copy the modified `init-pip-cuda-11.8.sh` init script to DBFS.
-  ```
-  databricks fs cp init-pip-cuda-11.8.sh dbfs:${SAVE_DIR}/init-pip-cuda-11.8.sh --profile ${PROFILE}
-  ```
-- Create a cluster using **Databricks 11.3 LTS ML GPU Runtime** using at least two single-gpu workers and add the following configurations to the **Advanced options**.
+  - if the cluster environment variable `SPARK_RAPIDS_ML_NO_IMPORT_ENABLED=1` is define (see below), the init script also modifies a Databricks notebook kernel startup script to enable no-import change UX for the cluster.  See [no-import-change](../README.md#no-import-change).
+- Create a cluster using **Databricks 13.3 LTS ML GPU Runtime** using at least two single-gpu workers and add the following configurations to the **Advanced options**.
   - **Init Scripts**
-    - add the DBFS path to the uploaded init script, e.g. `dbfs:/path/to/save/artifacts/init-pip-cuda-11.8.sh`.
+    - add the workspace path to the uploaded init script `${WS_SAVE_DIR}/init-pip-cuda-11.8.sh` as set above (but substitute variables manually in the form).
   - **Spark**
     - **Spark config**
       ```
-      spark.task.resource.gpu.amount 1
+      spark.task.resource.gpu.amount 0.125
       spark.databricks.delta.preview.enabled true
       spark.python.worker.reuse true
+<<<<<<< HEAD
       spark.executorEnv.PYTHONPATH /databricks/jars/rapids-4-spark_2.12-23.06.0.jar:/databricks/spark/python
+=======
+      spark.executorEnv.PYTHONPATH /databricks/jars/rapids-4-spark_2.12-24.10.1.jar:/databricks/spark/python
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
       spark.sql.execution.arrow.maxRecordsPerBatch 100000
       spark.rapids.memory.gpu.minAllocFraction 0.0001
       spark.plugins com.nvidia.spark.SQLPlugin
@@ -63,8 +53,9 @@ If you already have a Databricks account, you can run the example notebooks on a
     - **Environment variables**
       ```
       LIBCUDF_CUFILE_POLICY=OFF
-      LD_LIBRARY_PATH=/usr/local/cuda/compat:/usr/local/cuda/lib64
       NCCL_DEBUG=INFO
+      SPARK_RAPIDS_ML_NO_IMPORT_ENABLED=0
       ```
+      If you wish to enable [no-import-change](../README.md#no-import-change) UX for the cluster, set `SPARK_RAPIDS_ML_NO_IMPORT_ENABLED=1` instead.  The init script checks this cluster environment variable and modifies the runtime accordingly.
 - Start the configured cluster.
-- Select your workspace and upload the desired [notebook](../) via `Import` in the drop down menu for your workspace.
+- Select your workspace and upload the desired [notebook](../) via `Import` in the drop down menu for your workspace.  For the no-import-change UX, you can try the example [kmeans-no-import-change.ipynb](../kmeans-no-import-change.ipynb).

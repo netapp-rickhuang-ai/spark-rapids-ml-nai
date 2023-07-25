@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2022-2023, NVIDIA CORPORATION.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,25 +16,35 @@
 import argparse
 import sys
 
+from benchmark.bench_approximate_nearest_neighbors import (
+    BenchmarkApproximateNearestNeighbors,
+)
+from benchmark.bench_dbscan import BenchmarkDBSCAN
 from benchmark.bench_kmeans import BenchmarkKMeans
 from benchmark.bench_linear_regression import BenchmarkLinearRegression
+from benchmark.bench_logistic_regression import BenchmarkLogisticRegression
 from benchmark.bench_nearest_neighbors import BenchmarkNearestNeighbors
 from benchmark.bench_pca import BenchmarkPCA
 from benchmark.bench_random_forest import (
     BenchmarkRandomForestClassifier,
     BenchmarkRandomForestRegressor,
 )
+from benchmark.bench_umap import BenchmarkUMAP
 
 
 class BenchmarkRunner:
     def __init__(self) -> None:
         registered_algorithms = {
+            "approximate_nearest_neighbors": BenchmarkApproximateNearestNeighbors,
+            "dbscan": BenchmarkDBSCAN,
             "kmeans": BenchmarkKMeans,
             "knn": BenchmarkNearestNeighbors,
             "linear_regression": BenchmarkLinearRegression,
             "pca": BenchmarkPCA,
             "random_forest_classifier": BenchmarkRandomForestClassifier,
             "random_forest_regressor": BenchmarkRandomForestRegressor,
+            "logistic_regression": BenchmarkLogisticRegression,
+            "umap": BenchmarkUMAP,
         }
         algorithms = "\n    ".join(registered_algorithms.keys())
         parser = argparse.ArgumentParser(

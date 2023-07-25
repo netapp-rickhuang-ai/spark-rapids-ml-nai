@@ -1,4 +1,18 @@
 #!/bin/bash
+# Copyright (c) 2024, NVIDIA CORPORATION.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 cluster_type=${1:-gpu}
 BENCHMARK_DATA_HOME="s3://spark-rapids-ml-bm-datasets-public"
 
@@ -89,19 +103,66 @@ if [[ $? != 0 ]]; then
     exit 1
 fi
 
+ssh_command () {
+    aws emr wait cluster-running --cluster-id $CLUSTER_ID
+    if [[ $? != 0 ]]; then
+        echo "cluster terminated, exiting"
+        exit 1
+    fi
+    ssh -i $KEYPAIR -o StrictHostKeyChecking=no ec2-user@$masternode $1
+}
+
+get_masternode () {
+    aws emr list-instances --cluster-id $CLUSTER_ID --instance-group-type MASTER | grep PublicDnsName | grep -oP 'ec2[^"]*'
+}
+
+get_appid () {
+    ssh_command "hdfs dfs -text $stderr_path" | grep -oP "application_[0-9]*_[0-9]*" | head -n 1
+}
+
+get_appstatus () {
+    ssh_command "yarn application -status $app_id" | grep -P "\tState :" | grep -oP FINISHED
+}
+
 poll_stdout () {
     stdout_path=s3://${BENCHMARK_HOME}/logs/$1/steps/$2/stdout.gz
-    res="PENDING"
-    while [[ ${res} != *"COMPLETED"* ]]
+    stderr_path=s3://${BENCHMARK_HOME}/logs/$1/steps/$2/stderr.gz
+    masternode=$( get_masternode )
+
+    while [[ -z $masternode ]]; do
+    sleep 30
+    masternode=$( get_masternode )
+    done
+
+    echo masternode: $masternode
+    app_id=""
+
+    app_id=$( get_appid )
+    echo app_id: $app_id
+    while [[ -z $app_id ]]
     do
         sleep 30
-        res=$(aws emr describe-step --cluster-id $1 --step-id $2 | grep "State")
-        echo ${res}
-        if [[ ${res} == *"FAILED"* ]]; then
-            echo "Failed to finish step $2."
-            exit 1
-        fi
+        app_id=$( get_appid )
+        echo app_id: $app_id
     done
+
+    res=$( get_appstatus )
+    echo res: $res
+    while [[ ${res} != FINISHED ]]
+    do
+        sleep 30
+        res=$( get_appstatus )
+        echo res: ${res}
+    done
+
+    aws emr cancel-steps --cluster-id $1 --step-ids $2 --step-cancellation-option SEND_INTERRUPT
+
+    res=$( ssh_command "yarn application -status $app_id" | grep -P "\tFinal-State :" | sed -e 's/.*: *//g' )
+
+    if [[ $res != SUCCEEDED ]]; then
+        echo "benchmark step failed"
+        exit 1
+    fi
 
     # check if EMR stdout.gz is complete
     res=""
@@ -273,4 +334,26 @@ for i in `seq $rf_runs`; do
         --steps Type=Spark,Name="${device} Random Forest Regressor",ActionOnFailure=CONTINUE,Args=[${rf_regressor_args}] | tee /dev/tty | grep -o 's-[0-9|A-Z]*')
     set +x
     poll_stdout $CLUSTER_ID $STEP_ID ./random_forest_regressor_$i.out
+done
+
+echo
+echo "$sep algo: logistic regression $sep"
+lr_classification_args=$(cat << EOF
+${spark_submit_args},\
+logistic_regression,\
+${extra_args},\
+--num_runs,1,\
+--standardization,False,\
+--maxIter,200,\
+--tol,1e-30,\
+--regParam,0.00001,\
+--train_path,"${BENCHMARK_DATA_HOME}/classification/1m_3k_singlecol_float32_50_1_3_inf_red_files.parquet"
+EOF
+)
+for i in `seq $num_runs`; do
+    set -x
+    STEP_ID=$(aws emr add-steps --cluster-id ${CLUSTER_ID} \
+        --steps Type=Spark,Name="${device} Logistic Regression",ActionOnFailure=CONTINUE,Args=[${lr_classification_args}] | tee /dev/tty | grep -o 's-[0-9|A-Z]*')
+    set +x
+    poll_stdout $CLUSTER_ID $STEP_ID ./logistic_regression_$i.out
 done

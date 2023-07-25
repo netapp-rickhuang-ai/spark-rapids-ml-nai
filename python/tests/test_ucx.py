@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2023, NVIDIA CORPORATION.
+# Copyright (c) 2024, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -63,7 +63,7 @@ def test_ucx_over_nccl(
             rank = context.partitionId()
 
             # ucx requires nccl, and nccl initialization requires gpu assignment
-            _CumlCommon.set_gpu_device(context, is_local)
+            _CumlCommon._set_gpu_device(context, is_local)
             with CumlContext(
                 rank=rank,
                 nranks=gpu_number,
@@ -71,6 +71,13 @@ def test_ucx_over_nccl(
                 enable=True,
                 require_ucx=True,
             ) as cc:
+                # pyspark uses sighup to kill python workers gracefully, and for some reason
+                # the signal handler for sighup needs to be explicitly reset at this point
+                # to avoid having SIGHUP be swallowed during a usleep call in the nccl library.
+                # this helps avoid zombie surviving python workers when some workers fail.
+                import signal
+
+                signal.signal(signal.SIGHUP, signal.SIG_DFL)
 
                 async def do_allGather() -> List[str]:
                     loop = asyncio.get_running_loop()

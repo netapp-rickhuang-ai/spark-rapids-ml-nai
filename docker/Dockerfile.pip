@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2023, NVIDIA CORPORATION.
+# Copyright (c) 2025, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,7 +18,11 @@ ARG CUDA_VERSION=11.8.0
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 
 ARG PYSPARK_VERSION=3.3.1
+<<<<<<< HEAD
 ARG RAPIDS_VERSION=23.6.0
+=======
+ARG RAPIDS_VERSION=25.2.0
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 ARG ARCH=amd64
 #ARG ARCH=arm64
 # Install packages to build spark-rapids-ml
@@ -40,6 +44,11 @@ RUN apt-get update -y \
 RUN pip install --no-cache-dir \
     cudf-cu11~=${RAPIDS_VERSION} \
     cuml-cu11~=${RAPIDS_VERSION} \
+<<<<<<< HEAD
+=======
+    cuvs-cu11~=${RAPIDS_VERSION} \
+    numpy~=1.0 \
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
     --extra-index-url=https://pypi.nvidia.com
 
 # install python dependencies

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023, NVIDIA CORPORATION.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from abc import ABCMeta
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -28,16 +29,22 @@ from typing import (
 
 import numpy as np
 import pandas as pd
+import pyspark
 from pyspark import Row, TaskContext, keyword_only
 from pyspark.ml.common import _py2java
 from pyspark.ml.evaluation import Evaluator, RegressionEvaluator
 from pyspark.ml.linalg import Vector, Vectors, _convert_to_vector
 from pyspark.ml.regression import LinearRegressionModel as SparkLinearRegressionModel
-from pyspark.ml.regression import LinearRegressionSummary
+from pyspark.ml.regression import (
+    LinearRegressionSummary,
+)
 from pyspark.ml.regression import (
     RandomForestRegressionModel as SparkRandomForestRegressionModel,
 )
-from pyspark.ml.regression import _LinearRegressionParams, _RandomForestRegressorParams
+from pyspark.ml.regression import (
+    _LinearRegressionParams,
+    _RandomForestRegressorParams,
+)
 from pyspark.sql import Column, DataFrame
 from pyspark.sql.types import (
     ArrayType,
@@ -62,8 +69,8 @@ from .core import (
     alias,
     param_alias,
     pred,
-    transform_evaluate,
 )
+from .metrics import EvalMetricInfo, transform_evaluate_metric
 from .metrics.RegressionMetrics import RegressionMetrics, reg_metrics
 from .params import HasFeaturesCols, P, _CumlClass, _CumlParams
 from .tree import (
@@ -75,6 +82,7 @@ from .tree import (
 from .utils import PartitionDescriptor, _get_spark_session, cudf_to_cuml_array, java_uid
 
 if TYPE_CHECKING:
+    import cupy as cp
     from pyspark.ml._typing import ParamMap
 
 T = TypeVar("T")
@@ -129,21 +137,27 @@ class _RegressionModelEvaluationMixIn:
             ]
         )
 
-        rows = self._this_model._transform_evaluate_internal(dataset, schema).collect()
+        rows = self._this_model._transform_evaluate_internal(
+            dataset,
+            schema,
+            EvalMetricInfo(eval_metric=transform_evaluate_metric.regression),
+        ).collect()
 
-        metrics = RegressionMetrics.from_rows(num_models, rows)
+        metrics = RegressionMetrics._from_rows(num_models, rows)
         return [metric.evaluate(evaluator) for metric in metrics]
 
     @staticmethod
-    def calculate_regression_metrics(
+    def _calculate_regression_metrics(
         input: TransformInputType,
-        transformed: TransformInputType,
+        transformed: "cp.array",
     ) -> pd.DataFrame:
         """calculate the metrics: mean/m2n/m2/l1 ...
 
         input must have `alias.label` column"""
 
-        comb = pd.DataFrame(
+        import cudf
+
+        comb = cudf.DataFrame(
             {
                 "label": input[alias.label],
                 "prediction": transformed,
@@ -153,10 +167,12 @@ class _RegressionModelEvaluationMixIn:
         total_cnt = comb.shape[0]
         return pd.DataFrame(
             data={
-                reg_metrics.mean: [comb.mean().to_list()],
-                reg_metrics.m2n: [(comb.var(ddof=0) * total_cnt).to_list()],
-                reg_metrics.m2: [comb.pow(2).sum().to_list()],
-                reg_metrics.l1: [comb.abs().sum().to_list()],
+                reg_metrics.mean: [comb.mean().to_arrow().to_pylist()],
+                reg_metrics.m2n: [
+                    (comb.var(ddof=0) * total_cnt).to_arrow().to_pylist()
+                ],
+                reg_metrics.m2: [comb.pow(2).sum().to_arrow().to_pylist()],
+                reg_metrics.l1: [comb.abs().sum().to_arrow().to_pylist()],
                 reg_metrics.total_count: total_cnt,
             }
         )
@@ -183,7 +199,7 @@ class LinearRegressionClass(_CumlClass):
     @classmethod
     def _param_value_mapping(
         cls,
-    ) -> Dict[str, Callable[[str], Union[None, str, float, int]]]:
+    ) -> Dict[str, Callable[[Any], Union[None, str, float, int]]]:
         return {
             "loss": lambda x: {
                 "squaredError": "squared_loss",
@@ -202,6 +218,7 @@ class LinearRegressionClass(_CumlClass):
         return {
             "algorithm": "eig",
             "fit_intercept": True,
+            "copy_X": True,
             "normalize": False,
             "verbose": False,
             "alpha": 0.0001,
@@ -212,6 +229,9 @@ class LinearRegressionClass(_CumlClass):
             "tol": 0.001,
             "shuffle": True,
         }
+
+    def _pyspark_class(self) -> Optional[ABCMeta]:
+        return pyspark.ml.regression.LinearRegression
 
 
 class _LinearRegressionCumlParams(
@@ -237,28 +257,28 @@ class _LinearRegressionCumlParams(
         Sets the value of :py:attr:`featuresCol` or :py:attr:`featureCols`.
         """
         if isinstance(value, str):
-            self.set_params(featuresCol=value)
+            self._set_params(featuresCol=value)
         else:
-            self.set_params(featuresCols=value)
+            self._set_params(featuresCols=value)
         return self
 
     def setFeaturesCols(self: P, value: List[str]) -> P:
         """
         Sets the value of :py:attr:`featuresCols`.
         """
-        return self.set_params(featuresCols=value)
+        return self._set_params(featuresCols=value)
 
     def setLabelCol(self: P, value: str) -> P:
         """
         Sets the value of :py:attr:`labelCol`.
         """
-        return self.set_params(labelCol=value)
+        return self._set_params(labelCol=value)
 
     def setPredictionCol(self: P, value: str) -> P:
         """
         Sets the value of :py:attr:`predictionCol`.
         """
-        return self.set_params(predictionCol=value)
+        return self._set_params(predictionCol=value)
 
 
 class LinearRegression(
@@ -296,31 +316,31 @@ class LinearRegression(
     Parameters
     ----------
 
-    featuresCol:
+    featuresCol: str or List[str] (default = "features")
         The feature column names, spark-rapids-ml supports vector, array and columnar as the input.\n
             * When the value is a string, the feature columns must be assembled into 1 column with vector or array type.
             * When the value is a list of strings, the feature columns must be numeric types.
-    labelCol:
+    labelCol: str (default = "label")
         The label column name.
-    predictionCol:
+    predictionCol: str (default = "prediction")
         The prediction column name.
-    maxIter:
+    maxIter: int (default = 100)
         Max number of iterations (>= 0).
-    regParam:
-        Regularization parameter (>= 0)
-    elasticNetParam:
+    regParam: float (default = 0.0)
+        Regularization parameter (>= 0).
+    elasticNetParam: float (default = 0.0)
         The ElasticNet mixing parameter, in range [0, 1]. For alpha = 0,
         the penalty is an L2 penalty. For alpha = 1, it is an L1 penalty.
-    tol:
+    tol: float (default = 1e-6)
         The convergence tolerance for iterative algorithms (>= 0).
-    fitIntercept:
-        whether to fit an intercept term.
-    standardization:
+    fitIntercept: bool (default = True)
+        Whether to fit an intercept term.
+    standardization: bool (default = True)
         Whether to standardize the training features before fitting the model.
-    solver:
+    solver: str (default = "auto")
         The solver algorithm for optimization. If this is not set or empty, default value is 'auto'.\n
         The supported options: 'auto', 'normal' and 'eig', all of them will be mapped to 'eig' in cuML.
-    loss:
+    loss: str (default = "squaredError")
         The loss function to be optimized.
         The supported options: 'squaredError'
     num_workers:
@@ -412,43 +432,43 @@ class LinearRegression(
         **kwargs: Any,
     ):
         super().__init__()
-        self.set_params(**self._input_kwargs)
+        self._set_params(**self._input_kwargs)
 
     def setMaxIter(self, value: int) -> "LinearRegression":
         """
         Sets the value of :py:attr:`maxIter`.
         """
-        return self.set_params(maxIter=value)
+        return self._set_params(maxIter=value)
 
     def setRegParam(self, value: float) -> "LinearRegression":
         """
         Sets the value of :py:attr:`regParam`.
         """
-        return self.set_params(regParam=value)
+        return self._set_params(regParam=value)
 
     def setElasticNetParam(self, value: float) -> "LinearRegression":
         """
         Sets the value of :py:attr:`elasticNetParam`.
         """
-        return self.set_params(elasticNetParam=value)
+        return self._set_params(elasticNetParam=value)
 
     def setLoss(self, value: str) -> "LinearRegression":
         """
         Sets the value of :py:attr:`loss`.
         """
-        return self.set_params(loss=value)
+        return self._set_params(loss=value)
 
     def setStandardization(self, value: bool) -> "LinearRegression":
         """
         Sets the value of :py:attr:`standardization`.
         """
-        return self.set_params(standardization=value)
+        return self._set_params(standardization=value)
 
     def setTol(self, value: float) -> "LinearRegression":
         """
         Sets the value of :py:attr:`tol`.
         """
-        return self.set_params(tol=value)
+        return self._set_params(tol=value)
 
     def _pre_process_data(
         self, dataset: DataFrame
@@ -476,7 +496,10 @@ class LinearRegression(
         self,
         dataset: DataFrame,
         extra_params: Optional[List[Dict[str, Any]]] = None,
-    ) -> Callable[[FitInputType, Dict[str, Any]], Dict[str, Any],]:
+    ) -> Callable[
+        [FitInputType, Dict[str, Any]],
+        Dict[str, Any],
+    ]:
         def _linear_regression_fit(
             dfs: FitInputType,
             params: Dict[str, Any],
@@ -498,6 +521,7 @@ class LinearRegression(
                         "fit_intercept",
                         "normalize",
                         "verbose",
+                        "copy_X",
                     ]
                 else:
                     if init_parameters["l1_ratio"] == 0:
@@ -548,6 +572,10 @@ class LinearRegression(
                 final_init_parameters = {
                     k: v for k, v in init_parameters.items() if k in supported_params
                 }
+
+                # cuml adds copy_X argument since 23.08
+                if "copy_X" in final_init_parameters:
+                    final_init_parameters["copy_X"] = False
 
                 linear_regression = CumlLinearRegression(
                     handle=params[param_alias.handle],
@@ -602,7 +630,7 @@ class LinearRegression(
         )
 
     def _create_pyspark_model(self, result: Row) -> "LinearRegressionModel":
-        return LinearRegressionModel.from_row(result)
+        return LinearRegressionModel._from_row(result)
 
     def _enable_fit_multiple_in_single_pass(self) -> bool:
         return True
@@ -680,18 +708,24 @@ class LinearRegressionModel(
         return 1.0
 
     def predict(self, value: T) -> float:
-        """cuML doesn't support predicting 1 single sample.
-        Fall back to PySpark ML LinearRegressionModel"""
+        """predict a single sample"""
+        # cuML doesn't support predicting 1 single sample.
+        # Fall back to PySpark ML LinearRegressionModel
         return self.cpu().predict(value)
 
     def evaluate(self, dataset: DataFrame) -> LinearRegressionSummary:
-        """cuML doesn't support evaluating.
-        Fall back to PySpark ML LinearRegressionModel"""
+        """evaluate model on dataset"""
+        # cuML doesn't support evaluating.
+        # Fall back to PySpark ML LinearRegressionModel
         return self.cpu().evaluate(dataset)
 
     def _get_cuml_transform_func(
-        self, dataset: DataFrame, category: str = transform_evaluate.transform
-    ) -> Tuple[_ConstructFunc, _TransformFunc, Optional[_EvaluateFunc],]:
+        self, dataset: DataFrame, eval_metric_info: Optional[EvalMetricInfo] = None
+    ) -> Tuple[
+        _ConstructFunc,
+        _TransformFunc,
+        Optional[_EvaluateFunc],
+    ]:
         coef_ = self.coef_
         intercept_ = self.intercept_
         n_cols = self.n_cols
@@ -706,7 +740,11 @@ class LinearRegressionModel(
             intercepts = intercept_ if isinstance(intercept_, list) else [intercept_]
 
             for i in range(len(coefs)):
+<<<<<<< HEAD
                 lr = LinearRegressionMG(output_type="numpy")
+=======
+                lr = LinearRegressionMG(output_type="numpy", copy_X=False)
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
                 lr.coef_ = cudf_to_cuml_array(
                     np.array(coefs[i], order="F").astype(dtype)
                 )
@@ -717,17 +755,18 @@ class LinearRegressionModel(
 
             return lrs
 
-        def _predict(lr: CumlT, pdf: TransformInputType) -> pd.Series:
-            ret = lr.predict(pdf)
-            return pd.Series(ret)
+        if eval_metric_info:
 
-        return _construct_lr, _predict, self.calculate_regression_metrics
+            def _predict(lr: CumlT, pdf: TransformInputType) -> "cp.ndarray":
+                return lr.predict(pdf)
 
-    def _transform(self, dataset: DataFrame) -> DataFrame:
-        df = super()._transform(dataset)
-        return df.withColumn(
-            self.getPredictionCol(), df[self.getPredictionCol()].cast("double")
-        )
+        else:
+
+            def _predict(lr: CumlT, pdf: TransformInputType) -> pd.Series:
+                ret = lr.predict(pdf)
+                return pd.Series(ret)
+
+        return _construct_lr, _predict, self._calculate_regression_metrics
 
     @classmethod
     def _combine(
@@ -770,12 +809,15 @@ class _RandomForestRegressorClass(_RandomForestClass):
     @classmethod
     def _param_value_mapping(
         cls,
-    ) -> Dict[str, Callable[[str], Union[None, str, float, int]]]:
+    ) -> Dict[str, Callable[[Any], Union[None, str, float, int]]]:
         mapping = super()._param_value_mapping()
         mapping["split_criterion"] = lambda x: {"variance": "mse", "mse": "mse"}.get(
             x, None
         )
         return mapping
+
+    def _pyspark_class(self) -> Optional[ABCMeta]:
+        return pyspark.ml.regression.RandomForestRegressor
 
 
 class RandomForestRegressor(
@@ -807,25 +849,25 @@ class RandomForestRegressor(
     Parameters
     ----------
 
-    featuresCol:
+    featuresCol: str or List[str] (default = "features")
         The feature column names, spark-rapids-ml supports vector, array and columnar as the input.\n
             * When the value is a string, the feature columns must be assembled into 1 column with vector or array type.
             * When the value is a list of strings, the feature columns must be numeric types.
-    labelCol:
+    labelCol: str (default = "label")
         The label column name.
-    predictionCol:
+    predictionCol: str (default = "prediction")
         The prediction column name.
-    maxDepth:
+    maxDepth: int (default = 5)
         Maximum tree depth. Must be greater than 0.
-    maxBins:
+    maxBins: int (default = 32)
         Maximum number of bins used by the split algorithm per feature.
-    minInstancesPerNode:
+    minInstancesPerNode: int (default = 1)
         The minimum number of samples (rows) in each leaf node.
-    impurity: str = "variance",
+    impurity: str (default = "variance")
         The criterion used to split nodes.
-    numTrees:
+    numTrees: int (default = 20)
         Total number of trees in the forest.
-    featureSubsetStrategy:
+    featureSubsetStrategy: str (default = "auto")
         Ratio of number of features (columns) to consider per node split.\n
         The supported options:\n
             ``'auto'``:  If numTrees == 1, set to 'all', If numTrees > 1 (forest), set to 'onethird'\n
@@ -835,9 +877,9 @@ class RandomForestRegressor(
             ``'log2'``: log2(number of features)\n
             ``'n'``: when n is in the range (0, 1.0], use n * number of features. When n
             is in the range (1, number of features), use n features.
-    seed:
+    seed: int (default = None)
         Seed for the random number generator.
-    bootstrap:
+    bootstrap: bool (default = True)
         Control bootstrapping.\n
             * If ``True``, each tree in the forest is built on a bootstrapped
               sample with replacement.
@@ -855,11 +897,11 @@ class RandomForestRegressor(
             * ``4 or False`` - Enables all messages up to and including information messages.
             * ``5 or True`` - Enables all messages up to and including debug messages.
             * ``6`` - Enables all messages up to and including trace messages.
-    n_streams:
+    n_streams: int (default = 1)
         Number of parallel streams used for forest building.
         Please note that there is a bug running spark-rapids-ml on a node with multi-gpus
         when n_streams > 1. See https://github.com/rapidsai/cuml/issues/5402.
-    min_samples_split:
+    min_samples_split: int or float (default = 2)
         The minimum number of samples required to split an internal node.\n
          * If type ``int``, then ``min_samples_split`` represents the minimum
            number.
@@ -867,11 +909,11 @@ class RandomForestRegressor(
            and ``ceil(min_samples_split * n_rows)`` is the minimum number of
            samples for each split.    max_samples:
         Ratio of dataset rows used while fitting each tree.
-    max_leaves:
+    max_leaves: int (default = -1)
         Maximum leaf nodes per tree. Soft constraint. Unlimited, if -1.
-    min_impurity_decrease:
+    min_impurity_decrease: float (default = 0.0)
         Minimum decrease in impurity required for node to be split.
-    max_batch_size:
+    max_batch_size: int (default = 4096)
         Maximum number of nodes that can be processed in a given batch.
 
 
@@ -946,7 +988,7 @@ class RandomForestRegressor(
         return False
 
     def _create_pyspark_model(self, result: Row) -> "RandomForestRegressionModel":
-        return RandomForestRegressionModel.from_row(result)
+        return RandomForestRegressionModel._from_row(result)
 
     def _supportsTransformEvaluate(self, evaluator: Evaluator) -> bool:
         return True if isinstance(evaluator, RegressionEvaluator) else False
@@ -1004,10 +1046,16 @@ class RandomForestRegressionModel(
         return False
 
     def _get_cuml_transform_func(
-        self, dataset: DataFrame, category: str = transform_evaluate.transform
-    ) -> Tuple[_ConstructFunc, _TransformFunc, Optional[_EvaluateFunc],]:
-        _construct_rf, _predict, _ = super()._get_cuml_transform_func(dataset, category)
-        return _construct_rf, _predict, self.calculate_regression_metrics
+        self, dataset: DataFrame, eval_metric_info: Optional[EvalMetricInfo] = None
+    ) -> Tuple[
+        _ConstructFunc,
+        _TransformFunc,
+        Optional[_EvaluateFunc],
+    ]:
+        _construct_rf, _predict, _ = super()._get_cuml_transform_func(
+            dataset, eval_metric_info
+        )
+        return _construct_rf, _predict, self._calculate_regression_metrics
 
     def _transformEvaluate(
         self,

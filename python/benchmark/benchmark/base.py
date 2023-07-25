@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2023, NVIDIA CORPORATION.
+# Copyright (c) 2024, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 # limitations under the License.
 #
 import argparse
+import logging
 import pprint
 import subprocess
 from abc import abstractmethod
@@ -24,9 +25,20 @@ import pandas as pd
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.functions import array_to_vector
 from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.functions import col
 
 from benchmark.utils import WithSparkSession, to_bool, with_benchmark
-from pyspark.sql.functions import col
+
+# disable mlflow autologging if in the environment (e.g. Databricks)
+# due to observed heavy resource usage
+logging.warning("***** Disabling mflow autologging for benchmark runs *****")
+try:
+    import mlflow
+
+    mlflow.autolog(disable=True)
+except ImportError:
+    pass
+
 
 class BenchmarkBase:
     """Based class for benchmarking.

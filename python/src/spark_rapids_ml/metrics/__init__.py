@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2023, NVIDIA CORPORATION.
+# Copyright (c) 2024, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,3 +13,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+
+from collections import namedtuple
+from dataclasses import dataclass
+from typing import Optional
+
+# Global parameter used by core and subclasses.
+TransformEvaluateMetric = namedtuple(
+    "TransformEvaluateMetric", ("accuracy_like", "log_loss", "regression")
+)
+transform_evaluate_metric = TransformEvaluateMetric(
+    "accuracy_like", "log_loss", "regression"
+)
+
+
+@dataclass
+class EvalMetricInfo:
+    """Class for holding info about
+    Spark evaluators to be passed in to transform_evaluate local computations"""
+
+    # MulticlassClassificationEvaluator
+    eps: float = 1.0e-15  # logLoss
+    # BinaryClassificationEvaluator - placeholder till we support
+    numBins: int = 1000
+
+    eval_metric: Optional[str] = None

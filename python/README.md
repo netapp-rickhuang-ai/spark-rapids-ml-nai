@@ -1,16 +1,33 @@
-# Spark Rapids ML (Python)
+# Spark Rapids ML (Python) <!-- omit in toc -->
 
 This PySpark-compatible API leverages the RAPIDS cuML python API to provide GPU-accelerated implementations of many common ML algorithms.  These implementations are adapted to use PySpark for distributed training and inference.
+
+## Contents <!-- omit in toc -->
+- [Installation](#installation)
+- [Examples](#examples)
+  - [PySpark shell](#pyspark-shell)
+  - [Jupyter Notebooks](#jupyter-notebooks)
+- [API Compatibility](#api-compatibility)
+- [CLIs Enabling No Package Import Change](#clis-enabling-no-package-import-change)
+- [API Documentation](#api-documentation)
+
+---
 
 ## Installation
 
 For simplicity, the following instructions just use Spark local mode, assuming a server with at least one GPU.
 
-First, install RAPIDS cuML per [these instructions](https://rapids.ai/start.html).
+First, install RAPIDS cuML per [these instructions](https://rapids.ai/start.html).   Example for CUDA Toolkit 11.8:
 ```bash
+<<<<<<< HEAD
 conda create -n rapids-23.06 \
     -c rapidsai -c nvidia -c conda-forge \
     cuml=23.06 python=3.9 cudatoolkit=11.5
+=======
+conda create -n rapids-25.02 \
+    -c rapidsai -c conda-forge -c nvidia \
+    cuml=25.02 cuvs=25.02 python=3.10 cuda-version=11.8 numpy~=1.0
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 ```
 
 **Note**: while testing, we recommend using conda or docker to simplify installation and isolate your environment while experimenting.  Once you have a working environment, you can then try installing directly, if necessary.
@@ -19,15 +36,21 @@ conda create -n rapids-23.06 \
 
 Once you have the conda environment, activate it and install the required packages.
 ```bash
+<<<<<<< HEAD
 conda activate rapids-23.06
+=======
+conda activate rapids-25.02
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
-# for development access to notebooks, tests, and benchmarks
+## for development access to notebooks, tests, and benchmarks
 git clone --branch main https://github.com/NVIDIA/spark-rapids-ml.git
 cd spark-rapids-ml/python
-pip install -r requirements.txt
+# install additional non-RAPIDS python dependencies for dev
+pip install -r requirements_dev.txt
 pip install -e .
 
-# OPTIONAL: for package installation only
+## OPTIONAL: for package installation only
+# install additional non-RAPIDS python dependencies
 pip install -r https://raw.githubusercontent.com/NVIDIA/spark-rapids-ml/main/python/requirements.txt
 pip install spark-rapids-ml
 ```
@@ -38,7 +61,7 @@ These examples demonstrate the API using toy datasets.  However, GPUs are more e
 
 ### PySpark shell
 
-#### Linear Regression
+#### Linear Regression <!-- omit in toc -->
 ```python
 ## pyspark --master local[*]
 # from pyspark.ml.regression import LinearRegression
@@ -46,8 +69,8 @@ from spark_rapids_ml.regression import LinearRegression
 from pyspark.ml.linalg import Vectors
 
 df = spark.createDataFrame([
-     (1.0, 2.0, Vectors.dense(1.0, 0.0)),
-     (0.0, 2.0, Vectors.dense(0.0, 1.0))], ["label", "weight", "features"])
+     (1.0, Vectors.dense(1.0, 0.0)),
+     (0.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
 
 # number of partitions should match number of GPUs in Spark cluster
 df = df.repartition(1)
@@ -64,15 +87,15 @@ model.coefficients
 # DenseVector([0.5, -0.5])
 ```
 
-#### K-Means
+#### K-Means <!-- omit in toc -->
 ```python
 ## pyspark --master local[*]
 # from pyspark.ml.clustering import KMeans
 from spark_rapids_ml.clustering import KMeans
 from pyspark.ml.linalg import Vectors
-data = [(Vectors.dense([0.0, 0.0]), 2.0), (Vectors.dense([1.0, 1.0]), 2.0),
-        (Vectors.dense([9.0, 8.0]), 2.0), (Vectors.dense([8.0, 9.0]), 2.0)]
-df = spark.createDataFrame(data, ["features", "weighCol"])
+data = [(Vectors.dense([0.0, 0.0]),), (Vectors.dense([1.0, 1.0]),),
+        (Vectors.dense([9.0, 8.0]),), (Vectors.dense([8.0, 9.0]),)]
+df = spark.createDataFrame(data, ["features"])
 
 # number of partitions should match number of GPUs in Spark cluster
 df = df.repartition(1)
@@ -91,13 +114,13 @@ print(centers)
 model.setPredictionCol("newPrediction")
 transformed = model.transform(df)
 transformed.show()
-# +--------+----------+-------------+
-# |weighCol|  features|newPrediction|
-# +--------+----------+-------------+
-# |     2.0|[0.0, 0.0]|            1|
-# |     2.0|[1.0, 1.0]|            1|
-# |     2.0|[9.0, 8.0]|            0|
-# |     2.0|[8.0, 9.0]|            0|
+# +----------+-------------+
+# |  features|newPrediction|
+# +----------+-------------+
+# |[0.0, 0.0]|            1|
+# |[1.0, 1.0]|            1|
+# |[9.0, 8.0]|            0|
+# |[8.0, 9.0]|            0|
 # +--------+----------+-------------+
 rows[0].newPrediction == rows[1].newPrediction
 # True
@@ -105,7 +128,7 @@ rows[2].newPrediction == rows[3].newPrediction
 # True
 ```
 
-#### PCA
+#### PCA <!-- omit in toc -->
 ```python
 ## pyspark --master local[*]
 # from pyspark.ml.feature import PCA
@@ -179,6 +202,28 @@ print(centers)  # slightly different results
 # [[8.5, 8.5], [0.5, 0.5]]
 # PySpark: [array([0.5, 0.5]), array([8.5, 8.5])]
 ```
+
+## CLIs Enabling No Package Import Change
+
+Using some experimental CLIs included in `spark_rapids_ml`, pyspark application scripts importing estimators and models from `pyspark.ml` can be accelerated without the need for changing the package import statements to use `spark_rapids_ml` as in the above examples.  
+
+In the case of direct invocation of self-contained pyspark applications, the following can be used:
+```bash
+python -m spark_rapids_ml spark_enabled_application.py <application options>
+```
+and if the app is deployed using `spark-submit` the following included CLI (installed with the original `pip install spark-rapids-ml`) can be used:
+```bash
+spark-rapids-submit --master <master> <other spark submit options> application.py <application options>
+```
+
+A similar `spark_rapids_ml` enabling CLI is included for `pyspark` shell:
+```bash
+pyspark-rapids --master <master> <other pyspark options>
+```
+
+For the time being, any methods or attributes not supported by the corresponding accelerated `spark_rapids_ml` objects will result in errors.
+
+Nearly similar functionality can be enabled in [notebooks](../notebooks/README.md#no-import-change).
 
 ## API Documentation
 

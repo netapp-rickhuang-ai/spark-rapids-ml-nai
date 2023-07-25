@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2023, NVIDIA CORPORATION.
+# Copyright (c) 2025, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +14,14 @@
 # limitations under the License.
 #
 
-ARG CUDA_VERSION=11.5.2
+ARG CUDA_VERSION=11.8.0
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 
+<<<<<<< HEAD
 ARG CUML_VERSION=23.06
+=======
+ARG CUML_VERSION=25.02
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
 # Install packages to build spark-rapids-ml
 RUN apt update -y \
@@ -38,7 +42,11 @@ RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-py38_4.10.3-Linu
 
 # install cuML
 
+<<<<<<< HEAD
 RUN conda install -y -c rapidsai -c nvidia -c conda-forge python=3.9 cuda-toolkit=11.5 cuml=$CUML_VERSION \
+=======
+RUN conda install -y -c rapidsai -c conda-forge -c nvidia python=3.10 cuda-version=11.8 cuml=$CUML_VERSION numpy~=1.0 \
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
     && conda clean --all -f -y
 
 # install python dependencies

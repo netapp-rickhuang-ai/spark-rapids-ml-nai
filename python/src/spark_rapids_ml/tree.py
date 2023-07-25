@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2023, NVIDIA CORPORATION.
+# Copyright (c) 2025, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,17 +18,38 @@ import json
 import math
 import pickle
 from abc import abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+    cast,
+)
 
 import numpy as np
 import pandas as pd
-from pyspark.ml.classification import DecisionTreeClassificationModel
+from pyspark.ml.classification import (
+    DecisionTreeClassificationModel,
+)
 from pyspark.ml.classification import (
     RandomForestClassificationModel as SparkRandomForestClassificationModel,
 )
 from pyspark.ml.linalg import Vector
-from pyspark.ml.param.shared import HasFeaturesCol, HasLabelCol
-from pyspark.ml.regression import DecisionTreeRegressionModel
+from pyspark.ml.param.shared import (
+    HasFeaturesCol,
+    HasLabelCol,
+    Param,
+    Params,
+    TypeConverters,
+)
+from pyspark.ml.regression import (
+    DecisionTreeRegressionModel,
+)
 from pyspark.ml.regression import (
     RandomForestRegressionModel as SparkRandomForestRegressionModel,
 )
@@ -51,8 +72,8 @@ from .core import (
     _EvaluateFunc,
     _TransformFunc,
     param_alias,
-    transform_evaluate,
 )
+from .metrics import EvalMetricInfo
 from .params import HasFeaturesCols, P, _CumlClass, _CumlParams
 from .utils import (
     _concat_and_free,
@@ -61,6 +82,9 @@ from .utils import (
     java_uid,
     translate_trees,
 )
+
+if TYPE_CHECKING:
+    import cupy as cp
 
 
 class _RandomForestClass(_CumlClass):
@@ -88,7 +112,7 @@ class _RandomForestClass(_CumlClass):
     @classmethod
     def _param_value_mapping(
         cls,
-    ) -> Dict[str, Callable[[str], Union[None, str, float, int]]]:
+    ) -> Dict[str, Callable[[Any], Union[None, str, float, int]]]:
         def _tree_mapping(feature_subset: str) -> Union[None, str, float, int]:
             _maybe_numerical = _str_or_numerical(feature_subset)
             if isinstance(_maybe_numerical, int) or isinstance(_maybe_numerical, float):
@@ -114,7 +138,7 @@ class _RandomForestClass(_CumlClass):
             "n_streams": 4,
             "n_estimators": 100,
             "max_depth": 16,
-            "max_features": "auto",
+            "max_features": "sqrt",  # for classification, should be 1.0 for regressor, cuml is a little broken here
             "n_bins": 128,
             "bootstrap": True,
             "verbose": False,
@@ -134,8 +158,57 @@ class _RandomForestCumlParams(
     HasFeaturesCols,
     HasLabelCol,
 ):
+
+    n_streams = Param(
+        Params._dummy(),
+        "n_streams",
+        "The n_streams parameter to use for cuml.",
+        typeConverter=TypeConverters.toInt,
+    )
+
+    min_samples_split = Param(
+        Params._dummy(),
+        "min_samples_split",
+        "The min_sample_split parameter to use for cuml.",
+        typeConverter=TypeConverters.toInt,
+    )
+
+    max_samples = Param(
+        Params._dummy(),
+        "max_samples",
+        "The max_samples parameter to use for cuml.",
+        typeConverter=TypeConverters.toFloat,
+    )
+
+    max_leaves = Param(
+        Params._dummy(),
+        "max_leaves",
+        "The max_leaves parameter to use for cuml.",
+        typeConverter=TypeConverters.toInt,
+    )
+
+    min_impurity_decrease = Param(
+        Params._dummy(),
+        "min_impurity_decrease",
+        "The min_impurity_decrease parameter to use for cuml.",
+        typeConverter=TypeConverters.toFloat,
+    )
+
+    max_batch_size = Param(
+        Params._dummy(),
+        "max_batch_size",
+        "The max_batch_size parameter to use for cuml.",
+        typeConverter=TypeConverters.toInt,
+    )
+
     def __init__(self) -> None:
         super().__init__()
+        self._setDefault(n_streams=4)
+        self._setDefault(min_samples_split=2)
+        self._setDefault(max_samples=1.0)
+        self._setDefault(max_leaves=-1)
+        self._setDefault(min_impurity_decrease=0.0)
+        self._setDefault(max_batch_size=4096)
         # restrict default seed to max value of 32-bit signed integer for CuML
         self._setDefault(seed=hash(type(self).__name__) & 0x07FFFFFFF)
 
@@ -155,16 +228,16 @@ class _RandomForestCumlParams(
         Sets the value of :py:attr:`featuresCol` or :py:attr:`featureCols`.
         """
         if isinstance(value, str):
-            self.set_params(featuresCol=value)
+            self._set_params(featuresCol=value)
         else:
-            self.set_params(featuresCols=value)
+            self._set_params(featuresCols=value)
         return self
 
     def setFeaturesCols(self: P, value: List[str]) -> P:
         """
         Sets the value of :py:attr:`featuresCols`.
         """
-        return self.set_params(featuresCols=value)
+        return self._set_params(featuresCols=value)
 
     def setLabelCol(self: P, value: str) -> P:
         """
@@ -190,43 +263,43 @@ class _RandomForestEstimatorParams(_RandomForestCumlParams):
         """
         Sets the value of :py:attr:`bootstrap`.
         """
-        return self.set_params(bootstrap=value)
+        return self._set_params(bootstrap=value)
 
     def setFeatureSubsetStrategy(self: P, value: str) -> P:
         """
         Sets the value of :py:attr:`featureSubsetStrategy`.
         """
-        return self.set_params(featureSubsetStrategy=value)
+        return self._set_params(featureSubsetStrategy=value)
 
     def setImpurity(self: P, value: str) -> P:
         """
         Sets the value of :py:attr:`impurity`.
         """
-        return self.set_params(impurity=value)  # type: ignore
+        return self._set_params(impurity=value)  # type: ignore
 
     def setMaxBins(self: P, value: int) -> P:
         """
         Sets the value of :py:attr:`maxBins`.
         """
-        return self.set_params(maxBins=value)
+        return self._set_params(maxBins=value)
 
     def setMaxDepth(self: P, value: int) -> P:
         """
         Sets the value of :py:attr:`maxDepth`.
         """
-        return self.set_params(maxDepth=value)
+        return self._set_params(maxDepth=value)
 
     def setMinInstancesPerNode(self: P, value: int) -> P:
         """
         Sets the value of :py:attr:`minInstancesPerNode`.
         """
-        return self.set_params(minInstancesPerNode=value)
+        return self._set_params(minInstancesPerNode=value)
 
     def setNumTrees(self: P, value: int) -> P:
         """
         Sets the value of :py:attr:`numTrees`.
         """
-        return self.set_params(numTrees=value)
+        return self._set_params(numTrees=value)
 
     def setSeed(self: P, value: int) -> P:
         """
@@ -234,7 +307,7 @@ class _RandomForestEstimatorParams(_RandomForestCumlParams):
         """
         if value > 0x07FFFFFFF:
             raise ValueError("cuML seed value must be a 32-bit integer.")
-        return self.set_params(seed=value)
+        return self._set_params(seed=value)
 
 
 class _RandomForestEstimator(
@@ -243,7 +316,7 @@ class _RandomForestEstimator(
 ):
     def __init__(self, **kwargs: Any):
         super().__init__()
-        self.set_params(**kwargs)
+        self._set_params(**kwargs)
         if "n_streams" not in kwargs:
             # cuML will throw exception when running on a node with multi-gpus when n_streams > 0
             self._set_cuml_value("n_streams", 1)
@@ -270,7 +343,10 @@ class _RandomForestEstimator(
         self,
         dataset: DataFrame,
         extra_params: Optional[List[Dict[str, Any]]] = None,
-    ) -> Callable[[FitInputType, Dict[str, Any]], Dict[str, Any],]:
+    ) -> Callable[
+        [FitInputType, Dict[str, Any]],
+        Dict[str, Any],
+    ]:
         # Each element of n_estimators_of_all_params is a list value which
         # is composed of n_estimators per worker.
         n_estimators_of_all_params: List[List[int]] = []
@@ -339,7 +415,20 @@ class _RandomForestEstimator(
                     all_tl_mod_handles = [
                         rf._tl_handle_from_bytes(i) for i in mod_bytes
                     ]
-                    rf._concatenate_treelite_handle(all_tl_mod_handles)
+
+                    # tree concatenation raises a non-user friendly error if some workers didn't get all label values
+                    try:
+                        rf._concatenate_treelite_handle(all_tl_mod_handles)
+                    except RuntimeError as err:
+                        import traceback
+
+                        exc_str = traceback.format_exc()
+                        if "different num_class than the first model object" in exc_str:
+                            raise RuntimeError(
+                                "Some GPU workers did not receive all label values.  Rerun with fewer workers or shuffle input data."
+                            )
+                        else:
+                            raise err
 
                     from cuml.fil.fil import TreeliteModel
 
@@ -552,8 +641,12 @@ class _RandomForestModel(
         return uid, java_trees
 
     def _get_cuml_transform_func(
-        self, dataset: DataFrame, category: str = transform_evaluate.transform
-    ) -> Tuple[_ConstructFunc, _TransformFunc, Optional[_EvaluateFunc],]:
+        self, dataset: DataFrame, eval_metric_info: Optional[EvalMetricInfo] = None
+    ) -> Tuple[
+        _ConstructFunc,
+        _TransformFunc,
+        Optional[_EvaluateFunc],
+    ]:
         treelite_model = self._treelite_model
         is_classification = self._is_classification()
 
@@ -575,10 +668,18 @@ class _RandomForestModel(
 
             return rfs
 
-        def _predict(rf: CumlT, pdf: TransformInputType) -> pd.Series:
-            rf.update_labels = False
-            ret = rf.predict(pdf)
-            return pd.Series(ret)
+        if eval_metric_info:
+
+            def _predict(rf: CumlT, pdf: TransformInputType) -> "cp.ndarray":
+                rf.update_labels = False
+                return rf.predict(pdf)
+
+        else:
+
+            def _predict(rf: CumlT, pdf: TransformInputType) -> pd.Series:
+                rf.update_labels = False
+                ret = rf.predict(pdf)
+                return pd.Series(ret)
 
         # TBD: figure out why RF algo's warns regardless of what np array order is set
         return _construct_rf, _predict, None
@@ -597,7 +698,7 @@ class _RandomForestModel(
         first_model = models[0]
         treelite_models = [model._treelite_model for model in models]
         model_jsons = [model._model_json for model in models]
-        attrs = first_model.get_model_attributes()
+        attrs = first_model._get_model_attributes()
         assert attrs is not None
         attrs["treelite_model"] = treelite_models
         attrs["model_json"] = model_jsons

@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2023, NVIDIA CORPORATION.
+# Copyright (c) 2025, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,16 +15,29 @@
 #
 import json
 import math
-from typing import Any, Dict, List, Tuple, Type, TypeVar, Union, cast
+from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union, cast
 
 import numpy as np
+import pyspark
 import pytest
+from _pytest.logging import LogCaptureFixture
 from cuml import accuracy_score
+from packaging import version
+
+if version.parse(pyspark.__version__) < version.parse("3.4.0"):
+    from pyspark.sql.utils import IllegalArgumentException  # type: ignore
+else:
+    from pyspark.errors import IllegalArgumentException  # type: ignore
+
 from pyspark.ml.classification import (
     RandomForestClassificationModel as SparkRFClassificationModel,
 )
 from pyspark.ml.classification import RandomForestClassifier as SparkRFClassifier
-from pyspark.ml.evaluation import MulticlassClassificationEvaluator, RegressionEvaluator
+from pyspark.ml.evaluation import (
+    BinaryClassificationEvaluator,
+    MulticlassClassificationEvaluator,
+    RegressionEvaluator,
+)
 from pyspark.ml.linalg import Vectors
 from pyspark.ml.param import Param
 from pyspark.ml.regression import RandomForestRegressionModel as SparkRFRegressionModel
@@ -91,12 +104,28 @@ RandomForestModelType = TypeVar(
 
 
 @pytest.mark.parametrize("Estimator", [RandomForestClassifier, RandomForestRegressor])
-def test_default_cuml_params(Estimator: RandomForest) -> None:
+@pytest.mark.parametrize("default_params", [True, False])
+def test_params(default_params: bool, Estimator: RandomForest) -> None:
     from cuml.ensemble.randomforest_common import BaseRandomForestModel
+    from pyspark.ml.classification import (
+        RandomForestClassificationModel as SparkRandomForestClassifier,
+    )
+    from pyspark.ml.regression import (
+        RandomForestRegressionModel as SparkRandomForestRegressor,
+    )
+
+    SparkEstimator = (
+        SparkRandomForestClassifier
+        if Estimator == RandomForestClassifier
+        else SparkRandomForestRegressor
+    )
+    spark_params = {
+        param.name: value for param, value in SparkEstimator().extractParamMap().items()
+    }
 
     cuml_params = get_default_cuml_parameters(
-        [BaseRandomForestModel],
-        [
+        cuml_classes=[BaseRandomForestModel],
+        excludes=[
             "handle",
             "output_type",
             "accuracy_metric",
@@ -111,12 +140,88 @@ def test_default_cuml_params(Estimator: RandomForest) -> None:
             "class_weight",
         ],
     )
-    spark_params = Estimator()._get_cuml_params_default()
-    assert cuml_params == spark_params
+
+    # Ensure internal cuml defaults match actual cuml defaults
+    assert cuml_params == Estimator()._get_cuml_params_default()
+
+    # Our algorithm overrides the following cuml parameters with their spark defaults:
+    spark_default_overrides = {
+        "n_streams": 1,
+        "n_estimators": spark_params["numTrees"],
+        "max_depth": spark_params["maxDepth"],
+        "n_bins": spark_params["maxBins"],
+        "max_features": spark_params["featureSubsetStrategy"],
+        "split_criterion": {"gini": "gini", "variance": "mse"}.get(
+            spark_params["impurity"]
+        ),
+    }
+
+    cuml_params.update(spark_default_overrides)
+
+    if default_params:
+        est = Estimator()
+        seed = est.getSeed()
+        cuml_params["random_state"] = seed
+        spark_params["seed"] = seed
+    else:
+        est = Estimator(
+            maxDepth=7,
+            seed=42,
+        )
+        cuml_params["max_depth"] = 7
+        cuml_params["random_state"] = 42
+        spark_params["maxDepth"] = 7
+        spark_params["seed"] = 42
+
+    # Ensure both Spark API params and internal cuml_params are set correctly
+    assert_params(est, spark_params, cuml_params)
+    assert est.cuml_params == cuml_params
+
+    # setter/getter
+    from .test_common_estimator import _test_input_setter_getter
+
+    _test_input_setter_getter(Estimator)
+
+
+def test_rf_copy() -> None:
+    from .test_common_estimator import _test_est_copy
+
+    param_list: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]] = [
+        ({"maxDepth": 51}, {"max_depth": 51}),
+        ({"maxBins": 61}, {"n_bins": 61}),
+        ({"minInstancesPerNode": 63}, {"min_samples_leaf": 63}),
+        ({"numTrees": 56}, {"n_estimators": 56}),
+        ({"featureSubsetStrategy": "onethird"}, {"max_features": 1.0 / 3.0}),
+        ({"seed": 21}, {"random_state": 21}),
+        ({"bootstrap": False}, {"bootstrap": False}),
+    ]
+
+    cuml_specific_params: List[Dict[str, Any]] = [
+        {"n_streams": 2},
+        {"min_samples_split": 19},
+        {"max_samples": 0.77},
+        {"max_leaves": 72},
+        {"min_impurity_decrease": 0.03},
+        {"max_batch_size": 1025},
+        {"verbose": True},
+    ]
+
+    param_list += [(p, p) for p in cuml_specific_params]
+
+    for pair in param_list:
+        _test_est_copy(RandomForestClassifier, pair[0], pair[1])
+        _test_est_copy(RandomForestRegressor, pair[0], pair[1])
+
+    # RandomForestRegressor supports impurity="variance" only
+    _test_est_copy(
+        RandomForestClassifier, {"impurity": "entropy"}, {"split_criterion": "entropy"}
+    )
 
 
 @pytest.mark.parametrize("RFEstimator", [RandomForestClassifier, RandomForestRegressor])
-def test_random_forest_params(tmp_path: str, RFEstimator: RandomForest) -> None:
+def test_random_forest_params(
+    tmp_path: str, RFEstimator: RandomForest, caplog: LogCaptureFixture
+) -> None:
     # Default params
     default_spark_params = {
         "maxBins": 32,
@@ -166,6 +271,11 @@ def test_random_forest_params(tmp_path: str, RFEstimator: RandomForest) -> None:
     if RFEstimator == RandomForestRegressor:
         est = RFEstimator(impurity="variance")
         est.cuml_params["split_criterion"] == "mse"
+
+    # make sure no warning when enabling float64 inputs
+    rf_float32 = RFEstimator(float32_inputs=False)
+    assert "float32_inputs to False" not in caplog.text
+    assert not rf_float32._float32_inputs
 
 
 rf_est_model_classes = [
@@ -224,11 +334,8 @@ def test_random_forest_basic(
         def assert_model(lhs: RandomForestModel, rhs: RandomForestModel) -> None:
             assert lhs.cuml_params == rhs.cuml_params
 
-            # Vector type will be cast to array(double)
-            if feature_type == "vector":
-                assert lhs.dtype == np.dtype(np.float64).name
-            else:
-                assert lhs.dtype == np.dtype(data_type).name
+            # Vector and array(double) type will be cast to array(float) by default
+            assert lhs.dtype == np.dtype(np.float32).name
 
             assert lhs.dtype == rhs.dtype
             assert lhs.n_cols == rhs.n_cols
@@ -270,6 +377,10 @@ def test_random_forest_numeric_type(
         [5, 2, 1, 3, 4],
     ]
 
+    if RFEstimator is RandomForestClassifier:
+        # avoid different GPU to get different set of classes on the toy dataset
+        data *= 100
+
     with CleanSparkSession() as spark:
         feature_cols = ["c1", "c2", "c3", "c4"]
         schema = (
@@ -306,7 +417,7 @@ def test_random_forest_classifier(
     num_workers: int,
 ) -> None:
     X_train, X_test, y_train, y_test = make_classification_dataset(
-        datatype=data_type,
+        datatype=cast(np.dtype, np.float32),
         nrows=data_shape[0],
         ncols=data_shape[1],
         n_classes=n_classes,
@@ -316,9 +427,9 @@ def test_random_forest_classifier(
     )
 
     rf_params: Dict[str, Any] = {
-        "n_estimators": 100,
-        "n_bins": 128,
-        "max_depth": 16,
+        "n_estimators": 20,
+        "n_bins": 64,
+        "max_depth": 6,
         "bootstrap": False,
         "max_features": 1.0,
     }
@@ -354,11 +465,15 @@ def test_random_forest_classifier(
         result = spark_rf_model.transform(test_df).collect()
         pred_result = [row.prediction for row in result]
 
+        # no need to compare all feature types.
         if feature_type == feature_types.vector:
-            # no need to compare all feature type.
             spark_cpu_result = spark_rf_model.cpu().transform(test_df).collect()
             spark_cpu_pred_result = [row.prediction for row in spark_cpu_result]
-            assert array_equal(spark_cpu_pred_result, pred_result)
+            # Since the precision issue, we can ensure all the predictions are same.
+            commons = np.count_nonzero(
+                np.array(spark_cpu_pred_result) == np.array(pred_result)
+            )
+            assert commons / len(spark_cpu_pred_result) >= 0.99
 
         spark_acc = accuracy_score(y_test, np.array(pred_result))
 
@@ -383,12 +498,21 @@ def test_random_forest_classifier(
                 labelCol=spark_rf_model.getLabelCol(),
             )
 
-            spark_cuml_f1_score = spark_rf_model._transformEvaluate(test_df, evaluator)
+            y_test_fewer_classes = np.maximum(y_test - 1, 0)
 
-            transformed_df = spark_rf_model.transform(test_df)
-            pyspark_f1_score = evaluator.evaluate(transformed_df)
+            test_df_fewer_classes, _, _ = create_pyspark_dataframe(
+                spark, feature_type, data_type, X_test, y_test_fewer_classes
+            )
 
-            assert math.fabs(pyspark_f1_score - spark_cuml_f1_score[0]) < 1e-6
+            for _test_df in [test_df, test_df_fewer_classes]:
+                spark_cuml_f1_score = spark_rf_model._transformEvaluate(
+                    _test_df, evaluator
+                )
+
+                transformed_df = spark_rf_model.transform(_test_df)
+                pyspark_f1_score = evaluator.evaluate(transformed_df)
+
+                assert math.fabs(pyspark_f1_score - spark_cuml_f1_score[0]) < 1e-6
 
 
 @pytest.mark.parametrize("feature_type", pyspark_supported_feature_types)
@@ -405,18 +529,18 @@ def test_random_forest_regressor(
     num_workers: int,
 ) -> None:
     X_train, X_test, y_train, y_test = make_regression_dataset(
-        datatype=data_type,
+        datatype=cast(np.dtype, np.float32),
         nrows=data_shape[0],
         ncols=data_shape[1],
     )
 
     rf_params: Dict[str, Any] = {
-        "n_estimators": 100,
-        "n_bins": 128,
-        "max_depth": 16,
+        "n_estimators": 20,
+        "n_bins": 64,
+        "max_depth": 6,
         "bootstrap": False,
         "max_features": 1.0,
-        "random_state": 1.0,
+        "random_state": 1,
     }
 
     from cuml import RandomForestRegressor as cuRf
@@ -589,17 +713,16 @@ def test_random_forest_classifier_spark_compat(
             if isinstance(model, SparkRFClassificationModel):
                 assert result.prediction == 0.0
                 assert np.argmax(result.probability) == 0
+                assert np.argmax(result.newRawPrediction) == 0
             else:
                 # TODO: investigate difference
                 assert result.prediction == 1.0
                 assert np.argmax(result.probability) == 1
+                assert np.argmax(result.newRawPrediction) == 1
 
         if isinstance(model, SparkRFClassificationModel):
-            assert np.argmax(result.newRawPrediction) == 0
             assert result.leafId == Vectors.dense([0.0, 0.0, 0.0])
         else:
-            with pytest.raises((NotImplementedError, AttributeError)):
-                assert np.argmax(result.newRawPrediction) == 0
             with pytest.raises((NotImplementedError, AttributeError)):
                 assert result.leafId == Vectors.dense([0.0, 0.0, 0.0])
 
@@ -729,7 +852,7 @@ def test_fit_multiple_in_single_pass(
         )
 
         assert label_col is not None
-        rf = RFEstimator(bootstrap=False, max_features=1.0, random_state=1.0)
+        rf = RFEstimator(bootstrap=False, max_features=1.0, random_state=1)
         rf.setFeaturesCol(features_col)
         rf.setLabelCol(label_col)
 
@@ -742,9 +865,9 @@ def test_fit_multiple_in_single_pass(
                 rf.maxBins: 3,
                 rf.numTrees: 5,
                 rf.featureSubsetStrategy: "onethird",
-                rf.impurity: "entropy"
-                if isinstance(rf, RandomForestClassifier)
-                else "variance",
+                rf.impurity: (
+                    "entropy" if isinstance(rf, RandomForestClassifier) else "variance"
+                ),
                 rf.minInstancesPerNode: 2,
             },
             # different values for all supported pyspark parameters
@@ -753,9 +876,9 @@ def test_fit_multiple_in_single_pass(
                 rf.maxBins: 4,
                 rf.numTrees: 6,
                 rf.featureSubsetStrategy: "sqrt",
-                rf.impurity: "gini"
-                if isinstance(rf, RandomForestClassifier)
-                else "variance",
+                rf.impurity: (
+                    "gini" if isinstance(rf, RandomForestClassifier) else "variance"
+                ),
                 rf.minInstancesPerNode: 3,
             },
             # part of all supported pyspark parameters.
@@ -765,7 +888,7 @@ def test_fit_multiple_in_single_pass(
         models = rf.fit(train_df, param_maps)
 
         def get_num_trees(
-            model: Union[RandomForestClassificationModel, RandomForestRegressionModel]
+            model: Union[RandomForestClassificationModel, RandomForestRegressionModel],
         ) -> int:
             model_jsons = cast(List[str], model._model_json)
             trees = [
@@ -807,20 +930,27 @@ def test_fit_multiple_in_single_pass(
 @pytest.mark.parametrize(
     "estimator_evaluator",
     [
-        (RandomForestClassifier, MulticlassClassificationEvaluator),
-        (RandomForestRegressor, RegressionEvaluator),
+        (RandomForestClassifier, 4, MulticlassClassificationEvaluator, "accuracy"),
+        (RandomForestClassifier, 4, MulticlassClassificationEvaluator, "logLoss"),
+        (RandomForestClassifier, 2, BinaryClassificationEvaluator, "areaUnderROC"),
+        (RandomForestRegressor, None, RegressionEvaluator, None),
     ],
 )
 @pytest.mark.parametrize("feature_type", [feature_types.vector])
 @pytest.mark.parametrize("data_type", [np.float32])
 @pytest.mark.parametrize("data_shape", [(100, 8)], ids=idfn)
 def test_crossvalidator_random_forest(
-    estimator_evaluator: Tuple[RandomForest, RandomForestEvaluator],
+    estimator_evaluator: Tuple[
+        RandomForest,
+        Optional[int],
+        RandomForestEvaluator,
+        Optional[str],
+    ],
     feature_type: str,
     data_type: np.dtype,
     data_shape: Tuple[int, int],
 ) -> None:
-    RF, Evaluator = estimator_evaluator
+    RF, n_classes, Evaluator, metric = estimator_evaluator
 
     # Train a toy model
 
@@ -829,7 +959,7 @@ def test_crossvalidator_random_forest(
             datatype=data_type,
             nrows=data_shape[0],
             ncols=data_shape[1],
-            n_classes=4,
+            n_classes=n_classes,
             n_informative=data_shape[1],
             n_redundant=0,
             n_repeated=0,
@@ -853,6 +983,9 @@ def test_crossvalidator_random_forest(
 
         evaluator = Evaluator()
         evaluator.setLabelCol(label_col)
+
+        if metric:
+            evaluator.setMetricName(metric)  # type: ignore
 
         grid = (
             ParamGridBuilder()
@@ -882,3 +1015,25 @@ def test_crossvalidator_random_forest(
         spark_cv_model = spark_cv.fit(df)
 
         assert array_equal(model.avgMetrics, spark_cv_model.avgMetrics)
+
+
+def test_parameters_validation() -> None:
+    data = [
+        ([1.0, 2.0], 1.0),
+        ([3.0, 1.0], 0.0),
+    ]
+
+    with CleanSparkSession() as spark:
+        features_col = "features"
+        label_col = "label"
+        schema = features_col + " array<float>, " + label_col + " float"
+        df = spark.createDataFrame(data, schema=schema)
+        with pytest.raises(
+            IllegalArgumentException, match="maxDepth given invalid value -1"
+        ):
+            RandomForestClassifier(maxDepth=-1).fit(df)
+
+        with pytest.raises(
+            IllegalArgumentException, match="maxBins given invalid value -1"
+        ):
+            RandomForestRegressor().setMaxBins(-1).fit(df)

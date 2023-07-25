@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2022-2023, NVIDIA CORPORATION.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,14 +13,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import Any, Dict, List, Tuple, Type, TypeVar, cast
+import warnings
+from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, cast
 
 import numpy as np
+import pyspark
 import pytest
+from _pytest.logging import LogCaptureFixture
+from packaging import version
+
+if version.parse(pyspark.__version__) < version.parse("3.4.0"):
+    from pyspark.sql.utils import IllegalArgumentException  # type: ignore
+else:
+    from pyspark.errors import IllegalArgumentException  # type: ignore
+
 from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.functions import array_to_vector
-from pyspark.ml.linalg import Vectors
+from pyspark.ml.linalg import Vectors, VectorUDT
 from pyspark.ml.param import Param
 from pyspark.ml.regression import LinearRegression as SparkLinearRegression
 from pyspark.ml.regression import LinearRegressionModel as SparkLinearRegressionModel
@@ -66,7 +76,7 @@ def train_with_cuml_linear_regression(
     if alpha == 0:
         from cuml import LinearRegression as cuLinearRegression
 
-        lr = cuLinearRegression(output_type="numpy")
+        lr = cuLinearRegression(output_type="numpy", copy_X=False)
     else:
         if l1_ratio == 0.0:
             from cuml import Ridge
@@ -87,22 +97,65 @@ def train_with_cuml_linear_regression(
     return lr
 
 
-def test_default_cuml_params() -> None:
+@pytest.mark.parametrize("default_params", [True, False])
+def test_params(default_params: bool) -> None:
     from cuml.linear_model.linear_regression import (
         LinearRegression as CumlLinearRegression,
     )
     from cuml.linear_model.ridge import Ridge
     from cuml.solvers import CD
+    from pyspark.ml.regression import LinearRegression as SparkLinearRegression
+
+    spark_params = {
+        param.name: value
+        for param, value in SparkLinearRegression().extractParamMap().items()
+    }
 
     cuml_params = get_default_cuml_parameters(
-        [CumlLinearRegression, Ridge, CD], ["handle", "output_type"]
+        cuml_classes=[CumlLinearRegression, Ridge, CD],
+        excludes=["handle", "output_type"],
     )
-    spark_params = LinearRegression()._get_cuml_params_default()
-    assert cuml_params == spark_params
+
+    # Ensure internal cuml defaults match actual cuml defaults
+    assert cuml_params == LinearRegression()._get_cuml_params_default()
+
+    # Our algorithm overrides the following cuml parameters with their spark defaults:
+    spark_default_overrides = {
+        "alpha": spark_params["regParam"],
+        "l1_ratio": spark_params["elasticNetParam"],
+        "max_iter": spark_params["maxIter"],
+        "normalize": spark_params["standardization"],
+        "tol": spark_params["tol"],
+    }
+
+    cuml_params.update(spark_default_overrides)
+
+    if default_params:
+        lr = LinearRegression()
+    else:
+        lr = LinearRegression(
+            regParam=0.001,
+            maxIter=500,
+        )
+        cuml_params["alpha"] = 0.001
+        cuml_params["max_iter"] = 500
+        spark_params["regParam"] = 0.001
+        spark_params["maxIter"] = 500
+
+    # Ensure both Spark API params and internal cuml_params are set correctly
+    assert_params(lr, spark_params, cuml_params)
+    assert cuml_params == lr.cuml_params
+
+    # setter/getter
+    from .test_common_estimator import _test_input_setter_getter
+
+    _test_input_setter_getter(LinearRegression)
 
 
 @pytest.mark.parametrize("reg", [0.0, 0.7])
-def test_linear_regression_params(tmp_path: str, reg: float) -> None:
+def test_linear_regression_params(
+    tmp_path: str, reg: float, caplog: LogCaptureFixture
+) -> None:
     # Default params
     default_spark_params = {
         "elasticNetParam": 0.0,
@@ -156,10 +209,32 @@ def test_linear_regression_params(tmp_path: str, reg: float) -> None:
 
     # Unsupported value
     spark_params = {"solver": "l-bfgs"}
-    with pytest.raises(
-        ValueError, match="Value 'l-bfgs' for 'solver' param is unsupported"
-    ):
+    with pytest.raises(ValueError, match="solver given invalid value l-bfgs"):
         unsupported_lr = LinearRegression(**spark_params)
+
+    # make sure no warning when enabling float64 inputs
+    lr_float32 = LinearRegression(float32_inputs=False)
+    assert "float32_inputs to False" not in caplog.text
+    assert not lr_float32._float32_inputs
+
+
+def test_linear_regression_copy() -> None:
+    from .test_common_estimator import _test_est_copy
+
+    # solver supports 'auto', 'normal' and 'eig', but all of them will be mapped to 'eig' in cuML.
+    # loss supports 'squaredError' only,
+    param_list: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]] = [
+        ({"maxIter": 29}, {"max_iter": 29}),
+        ({"regParam": 0.12}, {"alpha": 0.12}),
+        ({"elasticNetParam": 0.23}, {"l1_ratio": 0.23}),
+        ({"fitIntercept": False}, {"fit_intercept": False}),
+        ({"standardization": False}, {"normalize": False}),
+        ({"tol": 0.0132}, {"tol": 0.0132}),
+        ({"verbose": True}, {"verbose": True}),
+    ]
+
+    for pair in param_list:
+        _test_est_copy(LinearRegression, pair[0], pair[1])
 
 
 @pytest.mark.parametrize("data_type", ["byte", "short", "int", "long"])
@@ -190,6 +265,7 @@ def test_linear_regression_numeric_type(gpu_number: int, data_type: str) -> None
 @pytest.mark.parametrize("data_type", cuml_supported_data_types)
 @pytest.mark.parametrize("data_shape", [(10, 2)], ids=idfn)
 @pytest.mark.parametrize("reg", [0.0, 0.7])
+@pytest.mark.parametrize("float32_inputs", [True, False])
 def test_linear_regression_basic(
     gpu_number: int,
     tmp_path: str,
@@ -197,6 +273,7 @@ def test_linear_regression_basic(
     data_type: np.dtype,
     data_shape: Tuple[int, int],
     reg: float,
+    float32_inputs: bool,
 ) -> None:
     # reduce the number of GPUs for toy dataset to avoid empty partition
     gpu_number = min(gpu_number, 2)
@@ -208,7 +285,7 @@ def test_linear_regression_basic(
             spark, feature_type, data_type, X, y
         )
 
-        lr = LinearRegression(num_workers=gpu_number)
+        lr = LinearRegression(num_workers=gpu_number, float32_inputs=float32_inputs)
         lr.setRegParam(reg)
 
         lr.setFeaturesCol(features_col)
@@ -235,7 +312,9 @@ def test_linear_regression_basic(
             assert lhs.intercept == rhs.intercept
 
             # Vector type will be cast to array(double)
-            if feature_type == "vector":
+            if float32_inputs:
+                assert lhs.dtype == "float32"
+            elif feature_type == "vector" and not float32_inputs:
                 assert lhs.dtype == np.dtype(np.float64).name
             else:
                 assert lhs.dtype == np.dtype(data_type).name
@@ -323,7 +402,7 @@ def test_linear_regression(
         )
         assert label_col is not None
 
-        slr = LinearRegression(num_workers=gpu_number, verbose=7, **other_params)
+        slr = LinearRegression(num_workers=gpu_number, verbose=6, **other_params)
         slr.setRegParam(alpha)
         slr.setStandardization(
             False
@@ -429,14 +508,16 @@ def test_linear_regression_spark_compat(
         assert array_equal(coefficients, expected_coefficients)
 
         intercept = model.intercept
-        assert np.isclose(intercept, -3.3089753423400734e-07)
+        assert np.isclose(intercept, -3.3089753423400734e-07, atol=1.0e-4)
 
         example = df.head()
         if example:
             model.predict(example.features)
 
         model.setPredictionCol("prediction")
-        output = model.transform(df).head()
+        output_df = model.transform(df)
+        assert isinstance(output_df.schema["features"].dataType, VectorUDT)
+        output = output_df.head()
         # Row(weight=1.0, label=2.0374512672424316, features=DenseVector([-0.2052, 1.4941]), prediction=2.037452415464224)
         assert np.isclose(output.prediction, 2.037452415464224)
 
@@ -626,3 +707,33 @@ def test_crossvalidator_linear_regression(
         spark_cv_model = spark_cv.fit(df)
 
         assert array_equal(model.avgMetrics, spark_cv_model.avgMetrics)
+
+
+def test_parameters_validation() -> None:
+    data = [
+        ([1.0, 2.0], 1.0),
+        ([3.0, 1.0], 0.0),
+    ]
+
+    with CleanSparkSession() as spark:
+        features_col = "features"
+        label_col = "label"
+        schema = features_col + " array<float>, " + label_col + " float"
+        df = spark.createDataFrame(data, schema=schema)
+        with pytest.raises(
+            IllegalArgumentException, match="maxIter given invalid value -1"
+        ):
+            LinearRegression(maxIter=-1).fit(df)
+
+        with pytest.raises(
+            IllegalArgumentException, match="regParam given invalid value -1.0"
+        ):
+            LinearRegression().setRegParam(-1.0).fit(df)
+
+        # shouldn't throw an exception for setting cuml values
+        LinearRegression(loss="squared_loss")._validate_parameters()
+
+    # setter/getter
+    from .test_common_estimator import _test_input_setter_getter
+
+    _test_input_setter_getter(LinearRegression)

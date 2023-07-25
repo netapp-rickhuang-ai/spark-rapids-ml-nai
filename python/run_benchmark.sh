@@ -1,16 +1,34 @@
 #! /bin/bash
+# Copyright (c) 2025, NVIDIA CORPORATION.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 #
 # Usage: ./run_benchmark.sh cpu|gpu|gpu_etl <mode> [<args>]
 # where <mode> can be:
 #     all
+#     dbscan
 #     kmeans
 #     knn
+#     approximate_nearest_neighbors
 #     linear_regression
 #     pca
 #     random_forest_classifier
 #     random_forest_regressor
+#     logistic_regression
+#     umap
 #
-#     and any comma separted list of the above like knn,linear_regression
+#     and any comma separated list of the above like knn,linear_regression
 #
 # gpu_etl is gpu ML with Spark RAPIDS plugin for gpu accelerated data loading
 # 
@@ -35,21 +53,40 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 cuda_version=${cuda_version:-11}
 
 # Set the correct Java path
+# would run gpu based kmeans and pca on respective synthetic datasets with 1m rows and 300 cols
+# and would enable the Spark RAPIDS plugin for gpu accelerated data loading.
+
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+cuda_version=${cuda_version:-11}
+
+<<<<<<< HEAD
+# Set the correct Java path
 export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-15.0.2.jdk/Contents/Home
 export PATH=$JAVA_HOME/bin:$PATH
 
+=======
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 cluster_type=${1:-gpu}
 shift
 local_threads=${local_threads:-4}
 num_gpus=1
 if [[ $cluster_type == "gpu" || $cluster_type == "gpu_etl" ]]; then
     num_cpus=0
+<<<<<<< HEAD
     if [ -n $CUDA_VISIBLE_DEVICES ]; then
+=======
+    use_gpu=true
+    if [[ -n $CUDA_VISIBLE_DEVICES ]]; then
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
         num_gpus=$(( `echo $CUDA_VISIBLE_DEVICES | grep -o ',' | wc -l` + 1 ))
     fi
 elif [[ $cluster_type == "cpu" ]]; then
     num_cpus=$local_threads
     num_gpus=0
+<<<<<<< HEAD
+=======
+    use_gpu=false
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 else
     echo "unknown cluster type $cluster_type"
     echo "usage: $0 cpu|gpu|gpu_etl mode [extra-args] "
@@ -67,12 +104,25 @@ unset SPARK_HOME
 # data set params
 num_rows=${num_rows:-5000}
 knn_num_rows=$num_rows
+<<<<<<< HEAD
 num_cols=${num_cols:-3000}
 
 # for large num_rows (e.g. > 100k), set below to ./python/benchmark/gen_data_distributed.py and /tmp/distributed
 gen_data_script=./python/benchmark/gen_data.py
 #gen_data_script=./python/benchmark/gen_data_distributed.py
 gen_data_root=./python/benchmark/data
+=======
+knn_fraction_sampled_queries=${knn_fraction_sampled_queries:-0.1}
+num_cols=${num_cols:-3000}
+num_sparse_cols=${num_sparse_cols:-3000}
+density=${density:-0.1}
+
+# for large num_rows (e.g. > 100k), set below to ./benchmark/gen_data_distributed.py and /tmp/distributed
+# gen_data_script=${gen_data_script:-./benchmark/gen_data.py}
+# gen_data_root=/tmp/data
+gen_data_script=${gen_data_script:-./benchmark/gen_data_distributed.py}
+gen_data_root=/tmp/distributed
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
 # if num_rows=1m => output_files=50, scale linearly
 output_num_files=$(( ( $num_rows * $num_cols + 3000 * 20000 - 1 ) / ( 3000 * 20000 ) ))
@@ -101,7 +151,11 @@ EOF
 
 if [[ $cluster_type == "gpu_etl" ]]
 then
+<<<<<<< HEAD
 SPARK_RAPIDS_VERSION=23.06.0
+=======
+SPARK_RAPIDS_VERSION=24.10.1
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 rapids_jar=${rapids_jar:-rapids-4-spark_2.12-$SPARK_RAPIDS_VERSION.jar}
 if [ ! -f $rapids_jar ]; then
     echo "downloading spark rapids jar"
@@ -120,7 +174,10 @@ cat <<EOF
 --spark_confs spark.sql.cache.serializer=com.nvidia.spark.ParquetCachedBatchSerializer \
 --spark_confs spark.rapids.memory.gpu.pooling.enabled=false \
 --spark_confs spark.rapids.sql.explain=ALL \
+<<<<<<< HEAD
 --spark_confs spark.rapids.memory.gpu.reserve=20 \
+=======
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 --spark_confs spark.sql.execution.sortBeforeRepartition=false \
 --spark_confs spark.rapids.sql.format.parquet.reader.type=MULTITHREADED \
 --spark_confs spark.rapids.sql.format.parquet.multiThreadedRead.maxNumFilesParallel=20 \
@@ -149,6 +206,10 @@ if [[ "${MODE}" =~ "kmeans" ]] || [[ "${MODE}" == "all" ]]; then
             --feature_type "array" \
             --output_dir "${gen_data_root}/default/r${num_rows}_c${num_cols}_float32.parquet" \
             $common_confs
+<<<<<<< HEAD
+=======
+           
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
     fi
 
     echo "$sep algo: kmeans $sep"
@@ -181,15 +242,87 @@ if [[ "${MODE}" =~ "knn" ]] || [[ "${MODE}" == "all" ]]; then
     fi
 
     echo "$sep algo: knn $sep"
+<<<<<<< HEAD
     python ./benchmark/benchmark_runner.py knn \
         --n_neighbors 3 \
+=======
+    OMP_NUM_THREADS=1 python ./benchmark/benchmark_runner.py knn \
+        --n_neighbors 20 \
+        --fraction_sampled_queries ${knn_fraction_sampled_queries} \
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
         --num_gpus $num_gpus \
         --num_cpus $num_cpus \
         --no_cache \
         --num_runs $num_runs \
         --train_path "${gen_data_root}/blobs/r${knn_num_rows}_c${num_cols}_float32.parquet" \
         --report_path "report_knn_${cluster_type}.csv" \
+<<<<<<< HEAD
         $common_confs $spark_rapids_confs \
+=======
+        --spark_confs "spark.driver.maxResultSize=0" \
+        $common_confs $spark_rapids_confs \
+        ${EXTRA_ARGS}
+fi
+
+# ApproximateNearestNeighbors
+if [[ "${MODE}" =~ "approximate_nearest_neighbors" ]] || [[ "${MODE}" == "all" ]]; then
+    algorithm=${algorithm:-"ivfflat"}
+    centers=${centers:-100}
+    data_path=${gen_data_root}/blobs/r${knn_num_rows}_c${num_cols}_cts${centers}_float32.parquet
+    if [[ ! -d ${data_path} ]]; then
+        python $gen_data_script blobs \
+            --num_rows ${knn_num_rows} \
+            --num_cols ${num_cols} \
+            --centers ${centers} \
+            --output_num_files $output_num_files \
+            --dtype "float32" \
+            --feature_type "array" \
+            --output_dir ${data_path} \
+            $common_confs
+    fi
+
+    echo "$sep algo: approximate_nearest_neighbors $sep"
+
+    nvecs_per_gpu=$knn_num_rows
+    if [ $num_gpus -gt 1 ]; then
+        nvecs_per_gpu=$(echo "$nvecs_per_gpu / $num_gpus" | bc)
+    fi
+
+    nlist=$(echo "${nvecs_per_gpu}" | awk '{print int(sqrt($1))}')
+    nprobe=$(echo "$nlist" | awk '{print int($1 * 0.01 + 0.9999)}')
+
+    algoParams_default="nlist=${nlist},nprobe=${nprobe}"
+    if [ $algorithm = "cagra" ]; then
+        algoParams_default="build_algo=nn_descent"
+    elif [ $algorithm = "ivfpq" ]; then
+        # In IVFPQ, larger M leads to higher recall yet slower runtime. When M is not set, benchmarking script will set its value to 10% of the dimension
+        ivfpq_M=$(echo "$num_cols" | awk '{print int($1 * 0.1 + 0.9999)}')
+        algoParams_default="${algoParams_default},M=${ivfpq_M},n_bits=8"
+    elif [ $algorithm != "ivfflat" ]; then
+        echo "algorithm ${algorithm} is not in the supported list"
+    fi
+    algoParams=${algoParams:-${algoParams_default}}
+
+    gpu_algo_params="algorithm=${algorithm},${algoParams}"
+    if [ -z "$algoParams" ]; then
+        gpu_algo_params="algorithm=${algorithm}"
+    fi
+
+    cpu_algo_params='numHashTables=3,bucketLength=2.0' 
+    python ./benchmark/benchmark_runner.py approximate_nearest_neighbors \
+        --k 20 \
+        --fraction_sampled_queries ${knn_fraction_sampled_queries} \
+        --num_gpus $num_gpus \
+        --gpu_algo_params $gpu_algo_params \
+        --num_cpus $num_cpus \
+        --cpu_algo_params $cpu_algo_params \
+        --no_cache \
+        --num_runs $num_runs \
+        --train_path ${data_path} \
+        --report_path "report_approximate_nearest_neighbors_${cluster_type}.csv" \
+        $common_confs $spark_rapids_confs \
+        --spark_confs spark.driver.maxResultSize=0 \
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
         ${EXTRA_ARGS}
 fi
 
@@ -306,16 +439,31 @@ fi
 
 # Random Forest Classification
 if [[ "${MODE}" =~ "random_forest_classifier" ]] || [[ "${MODE}" == "all" ]]; then
+<<<<<<< HEAD
     if [[ ! -d ${gen_data_root}/classification/r${num_rows}_c${num_cols}_float32.parquet ]]; then
         python $gen_data_script classification \
             --n_informative $( expr $num_cols / 3 )  \
             --n_redundant $( expr $num_cols / 3 ) \
+=======
+    num_classes=2
+    data_path=${gen_data_root}/classification/r${num_rows}_c${num_cols}_float32_ncls${num_classes}.parquet
+
+    if [[ ! -d ${data_path} ]]; then
+        python $gen_data_script classification \
+            --n_informative $( expr $num_cols / 3 )  \
+            --n_redundant $( expr $num_cols / 3 ) \
+            --n_classes ${num_classes} \
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
             --num_rows $num_rows \
             --num_cols $num_cols \
             --output_num_files $output_num_files \
             --dtype "float32" \
             --feature_type "array" \
+<<<<<<< HEAD
             --output_dir "${gen_data_root}/classification/r${num_rows}_c${num_cols}_float32.parquet" \
+=======
+            --output_dir "${data_path}" \
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
             $common_confs
     fi
 
@@ -327,8 +475,13 @@ if [[ "${MODE}" =~ "random_forest_classifier" ]] || [[ "${MODE}" == "all" ]]; th
         --num_gpus $num_gpus \
         --num_cpus $num_cpus \
         --num_runs $num_runs \
+<<<<<<< HEAD
         --train_path "${gen_data_root}/classification/r${num_rows}_c${num_cols}_float32.parquet" \
         --transform_path "${gen_data_root}/classification/r${num_rows}_c${num_cols}_float32.parquet" \
+=======
+        --train_path "${data_path}" \
+        --transform_path "${data_path}" \
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
         --report_path "report_rf_classifier_${cluster_type}.csv" \
         $common_confs $spark_rapids_confs \
         ${EXTRA_ARGS}
@@ -359,5 +512,197 @@ if [[ "${MODE}" =~ "random_forest_regressor" ]] || [[ "${MODE}" == "all" ]]; the
         --transform_path "${gen_data_root}/regression/r${num_rows}_c${num_cols}_float32.parquet" \
         --report_path "report_rf_regressor_${cluster_type}.csv" \
         $common_confs $spark_rapids_confs \
+<<<<<<< HEAD
+=======
+        ${EXTRA_ARGS}
+fi
+
+# Logistic Regression Classification
+if [[ "${MODE}" =~ "logistic_regression" ]] || [[ "${MODE}" == "all" ]]; then
+    num_classes_list=${num_classes_list:-"2 10"}
+
+    for num_classes in ${num_classes_list}; do
+
+        data_path=${gen_data_root}/classification/r${num_rows}_c${num_cols}_float32_ncls${num_classes}.parquet
+
+        if [[ ! -d ${data_path} ]]; then
+            python $gen_data_script classification \
+                --n_informative $( expr $num_cols / 3 )  \
+                --n_redundant $( expr $num_cols / 3 ) \
+                --n_classes ${num_classes} \
+                --num_rows $num_rows \
+                --num_cols $num_cols \
+                --output_num_files $output_num_files \
+                --dtype "float32" \
+                --feature_type "array" \
+                --output_dir ${data_path} \
+                $common_confs
+        fi
+
+        family="Binomial"
+        if [ ${num_classes} -gt 2 ]; then
+            family="Multinomial"
+        fi
+
+        echo "$sep algo: ${family} logistic regression - l2 regularization $sep"
+        python ./benchmark/benchmark_runner.py logistic_regression \
+            --standardization False \
+            --maxIter 200 \
+            --tol 1e-30 \
+            --regParam 0.00001 \
+            --elasticNetParam 0 \
+            --num_gpus $num_gpus \
+            --num_cpus $num_cpus \
+            --num_runs $num_runs \
+            --train_path ${data_path} \
+            --transform_path ${data_path} \
+            --report_path "report_logistic_regression_${cluster_type}.csv" \
+            $common_confs $spark_rapids_confs \
+            ${EXTRA_ARGS}
+    done
+
+    for num_classes in ${num_classes_list}; do
+
+        data_path=${gen_data_root}/classification/r${num_rows}_c${num_cols}_float32_ncls${num_classes}.parquet
+
+        family="Binomial"
+        if [ ${num_classes} -gt 2 ]; then
+            family="Multinomial"
+        fi
+
+        echo "$sep algo: ${family} logistic regression - elasticnet regularization $sep"
+        python ./benchmark/benchmark_runner.py logistic_regression \
+            --standardization False \
+            --maxIter 200 \
+            --tol 1e-30 \
+            --regParam 0.00001 \
+            --elasticNetParam 0.2 \
+            --num_gpus $num_gpus \
+            --num_cpus $num_cpus \
+            --num_runs $num_runs \
+            --train_path ${data_path} \
+            --transform_path ${data_path} \
+            --report_path "report_logistic_regression_${cluster_type}.csv" \
+            $common_confs $spark_rapids_confs \
+            ${EXTRA_ARGS}
+    done
+    
+    # Logistic Regression with sparse vector dataset
+    PYSPARK_4_below=$(python -c "import pyspark; from packaging import version; cmp = version.parse(pyspark.__version__) < version.parse('3.4.0'); print(cmp);")
+    if [ $PYSPARK_4_below = "True" ]; then
+        echo "Skip benchmarking logistic regression on sparse vectors. Spark 3.4 and above is required."
+    else
+        for num_classes in ${num_classes_list}; do
+            data_path=${gen_data_root}/sparse_logistic_regression/r${num_rows}_c${num_sparse_cols}_float64_ncls${num_classes}.parquet
+
+            if [[ ! -d ${data_path} ]]; then
+                python $gen_data_script sparse_regression \
+                --n_informative $( expr $num_cols / 3 )  \
+                --num_rows $num_rows \
+                --num_cols $num_sparse_cols \
+                --output_num_files $output_num_files \
+                --dtype "float64" \
+                --feature_type "vector" \
+                --output_dir ${data_path} \
+                --density $density \
+                --logistic_regression "True" \
+                --n_classes ${num_classes} \
+                --use_gpu ${use_gpu} \
+                $common_confs
+            fi
+
+            family="Binomial"
+                
+            echo "$sep algo: sparse ${family} logistic regression - elasticnet regularization $sep"
+            python ./benchmark/benchmark_runner.py logistic_regression \
+                --standardization False \
+                --maxIter 200 \
+                --tol 1e-30 \
+                --regParam 0.00001 \
+                --elasticNetParam 0.2 \
+                --num_gpus $num_gpus \
+                --num_cpus $num_cpus \
+                --num_runs $num_runs \
+                --train_path ${data_path} \
+                --transform_path ${data_path} \
+                --report_path "report_sparse_logistic_regression_${cluster_type}.csv" \
+                $common_confs $spark_rapids_confs \
+                ${EXTRA_ARGS}
+        done
+    fi
+fi
+
+# UMAP
+if [[ "${MODE}" =~ "umap" ]] || [[ "${MODE}" == "all" ]]; then
+    if [[ ! -d "${gen_data_root}/blobs/r${num_rows}_c${num_cols}_float32.parquet" ]]; then
+        python $gen_data_script blobs \
+            --num_rows $num_rows \
+            --num_cols $num_cols \
+            --output_num_files $output_num_files \
+            --dtype "float32" \
+            --feature_type "array" \
+            --output_dir "${gen_data_root}/blobs/r${num_rows}_c${num_cols}_float32.parquet" \
+            $common_confs
+    fi
+
+    echo "$sep algo: umap $sep"
+    if [ "$num_cpus" -gt 0 ]; then
+        k_arg="--k 3"
+    else
+        k_arg=""
+    fi
+    # UMAP involves a large amount of data transfer to the driver
+    spark_rapids_confs_umap="$spark_rapids_confs --spark_confs spark.driver.maxResultSize=0"
+
+    python ./benchmark/benchmark_runner.py umap \
+        $k_arg \
+        --num_gpus $num_gpus \
+        --num_cpus $num_cpus \
+        --no_cache \
+        --num_runs $num_runs \
+        --train_path "${gen_data_root}/blobs/r${num_rows}_c${num_cols}_float32.parquet" \
+        --report_path "report_umap_${cluster_type}.csv" \
+        $common_confs $spark_rapids_confs_umap \
+        ${EXTRA_ARGS}
+fi
+
+# DBSCAN
+if [[ "${MODE}" =~ "dbscan" ]] || [[ "${MODE}" == "all" ]]; then
+    if [[ ! -d "${gen_data_root}/blobs/r${num_rows}_c${num_cols}_float32.parquet" ]]; then
+        python $gen_data_script blobs \
+            --num_rows $num_rows \
+            --num_cols $num_cols \
+            --output_num_files $output_num_files \
+            --dtype "float32" \
+            --feature_type "array" \
+            --output_dir "${gen_data_root}/blobs/r${num_rows}_c${num_cols}_float32.parquet" \
+            $common_confs
+           
+    fi
+
+    # DBSCAN involves a large amount of data transfer to the driver for broadcast
+    spark_rapids_confs_dbscan="$spark_rapids_confs --spark_confs spark.driver.maxResultSize=0"
+
+    # Compute score when datasize is suitable
+    if (($num_rows * $num_cols < 50000000)); then
+        spark_rapids_confs_dbscan="$spark_rapids_confs_dbscan --compute_score"
+    fi
+
+    echo "$sep algo: dbscan $sep"
+    python ./benchmark/benchmark_runner.py dbscan \
+        --eps 100 \
+        --min_samples 5 \
+        --k 3 \
+        --tol 1.0e-20 \
+        --maxIter 30 \
+        --initMode random \
+        --num_gpus $num_gpus \
+        --num_cpus $num_cpus \
+        --no_cache \
+        --num_runs $num_runs \
+        --train_path "${gen_data_root}/blobs/r${num_rows}_c${num_cols}_float32.parquet" \
+        --report_path "report_dbscan_${cluster_type}.csv" \
+        $common_confs $spark_rapids_confs_dbscan \
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
         ${EXTRA_ARGS}
 fi

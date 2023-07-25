@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2022, NVIDIA CORPORATION.
+# Copyright (c) 2025, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,4 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+<<<<<<< HEAD
 __version__ = "23.6.0"
+=======
+__version__ = "25.02.0"
+
+import pandas as pd
+import pyspark
+
+# patch pandas 2.0+ for backward compatibility with psypark < 3.4
+from packaging import version
+
+if version.parse(pyspark.__version__) < version.parse("3.4.0") and version.parse(
+    pd.__version__
+) >= version.parse("2.0.0"):
+    pd.DataFrame.iteritems = pd.DataFrame.items
+    pd.Series.iteritems = pd.Series.items
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c

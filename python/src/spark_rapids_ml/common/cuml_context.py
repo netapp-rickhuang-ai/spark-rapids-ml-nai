@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2022-2023, NVIDIA CORPORATION.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -138,6 +138,7 @@ class CumlContext:
             inject_comms_on_handle(
                 self._handle,
                 self._nccl_comm,
+                False,  # is_ucxx - TODO: migrate to ucxx from ucp
                 self._ucx.get_worker(),  # type: ignore
                 self._ucx_eps,
                 self._nranks,
@@ -150,7 +151,13 @@ class CumlContext:
         if not self.enable:
             return
         assert self._nccl_comm is not None
-        self._nccl_comm.destroy()
+
+        # if no exception cleanup nicely, otherwise abort
+        if not args[0]:
+            self._nccl_comm.destroy()
+        else:
+            self._nccl_comm.abort()
+
         del self._nccl_comm
 
         del self._handle

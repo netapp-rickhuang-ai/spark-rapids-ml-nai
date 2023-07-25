@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2023, NVIDIA CORPORATION.
+# Copyright (c) 2025, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 
-ARG CUDA_VERSION=11.5.2
+ARG CUDA_VERSION=11.8.0
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
 
 # Install packages to build spark-rapids-ml
@@ -28,14 +28,22 @@ ENV JAVA_HOME /usr/lib/jvm/java-1.8.0-openjdk-amd64
 
 # Install conda
 ENV PATH="/root/miniconda3/bin:${PATH}"
-RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-py38_4.10.3-Linux-x86_64.sh \
+RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
     && mkdir /root/.conda \
-    && bash Miniconda3-py38_4.10.3-Linux-x86_64.sh -b \
-    && rm -f Miniconda3-py38_4.10.3-Linux-x86_64.sh \
-    && conda init
+    && bash Miniconda3-latest-Linux-x86_64.sh -b \
+    && rm -f Miniconda3-latest-Linux-x86_64.sh \
+    && conda init && conda update -n base conda \
+    && conda install -n base conda-libmamba-solver \
+    && conda config --set solver libmamba
 
 # install cuML
+<<<<<<< HEAD
 ARG CUML_VER=23.06
 RUN conda install -y -c conda-forge mamba=1.4.9 libarchive && \
     mamba install -y -c rapidsai -c nvidia -c conda-forge cuml=$CUML_VER python=3.9 cuda-toolkit=11.5 \
     && mamba clean --all -f -y
+=======
+ARG CUML_VER=25.02
+RUN conda install -y -c rapidsai -c conda-forge -c nvidia cuml=$CUML_VER cuvs=$CUML_VER python=3.10 cuda-version=11.8 numpy~=1.0 \
+    && conda clean --all -f -y
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c

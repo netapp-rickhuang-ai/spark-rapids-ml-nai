@@ -43,6 +43,8 @@ Classification
     :template: autosummary/class_with_docs.rst
     :toctree: api
 
+    LogisticRegression
+    LogisticRegressionModel
     RandomForestClassifier
     RandomForestClassificationModel
 
@@ -55,6 +57,8 @@ Clustering
     :template: autosummary/class_with_docs.rst
     :toctree: api
 
+    DBSCAN
+    DBSCANModel
     KMeans
     KMeansModel
 
@@ -83,6 +87,8 @@ Nearest Neighbors
     :template: autosummary/class_with_docs.rst
     :toctree: api
 
+    ApproximateNearestNeighbors
+    ApproximateNearestNeighborsModel
     NearestNeighbors
     NearestNeighborsModel
 
@@ -97,3 +103,16 @@ Tuning
     :toctree: api
 
     CrossValidator
+    
+
+UMAP
+----
+
+.. currentmodule:: spark_rapids_ml.umap
+
+.. autosummary::
+    :template: autosummary/class_with_docs.rst
+    :toctree: api
+
+    UMAP
+    UMAPModel

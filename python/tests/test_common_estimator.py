@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2022-2023, NVIDIA CORPORATION.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,12 +14,13 @@
 # limitations under the License.
 #
 
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from abc import ABCMeta
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import numpy as np
 import pandas as pd
 import pytest
-from pyspark import Row, TaskContext
+from pyspark import Row, SparkConf, TaskContext
 from pyspark.ml.param import Param, Params, TypeConverters
 from pyspark.ml.param.shared import HasInputCols, HasOutputCols
 from pyspark.sql import DataFrame
@@ -34,8 +35,8 @@ from spark_rapids_ml.core import (
     _EvaluateFunc,
     _TransformFunc,
     param_alias,
-    transform_evaluate,
 )
+from spark_rapids_ml.metrics import EvalMetricInfo
 from spark_rapids_ml.params import _CumlClass, _CumlParams
 from spark_rapids_ml.utils import PartitionDescriptor
 
@@ -134,7 +135,7 @@ class SparkRapidsMLDummy(
         #
 
         super().__init__()
-        self.set_params(**kwargs)
+        self._set_params(**kwargs)
         self.m = m
         self.n = n
         self.partition_num = partition_num
@@ -151,22 +152,25 @@ class SparkRapidsMLDummy(
         return self._set(outputCols=value)
 
     def setAlpha(self, value: int) -> "SparkRapidsMLDummy":
-        return self.set_params(**{"alpha": value})
+        return self._set_params(**{"alpha": value})
 
     def setBeta(self, value: int) -> "SparkRapidsMLDummy":
         raise ValueError("Not supported")
 
     def setGamma(self, value: float) -> "SparkRapidsMLDummy":
-        return self.set_params(**{"gamma": value})
+        return self._set_params(**{"gamma": value})
 
     def setK(self, value: str) -> "SparkRapidsMLDummy":
-        return self.set_params(**{"k": value})
+        return self._set_params(**{"k": value})
 
     def _get_cuml_fit_func(
         self,
         dataset: DataFrame,
         extra_params: Optional[List[Dict[str, Any]]] = None,
-    ) -> Callable[[FitInputType, Dict[str, Any]], Dict[str, Any],]:
+    ) -> Callable[
+        [FitInputType, Dict[str, Any]],
+        Dict[str, Any],
+    ]:
         num_workers = self.num_workers
         partition_num = self.partition_num
         m = self.m
@@ -232,7 +236,10 @@ class SparkRapidsMLDummy(
         assert result.n_cols == self.n
         assert result.model_attribute_a == 1024
         assert result.model_attribute_b == "hello dummy"
-        return SparkRapidsMLDummyModel.from_row(result)
+        return SparkRapidsMLDummyModel._from_row(result)
+
+    def _pyspark_class(self) -> Optional[ABCMeta]:
+        return None
 
 
 class SparkRapidsMLDummyModel(
@@ -263,7 +270,7 @@ class SparkRapidsMLDummyModel(
         )  # type: ignore
         self.model_attribute_a = model_attribute_a
         self.model_attribute_b = model_attribute_b
-        self.set_params(**kwargs)
+        self._set_params(**kwargs)
 
     def setInputCols(self, value: List[str]) -> "SparkRapidsMLDummyModel":
         return self._set(inputCols=value)
@@ -272,13 +279,18 @@ class SparkRapidsMLDummyModel(
         return self._set(outputCols=value)
 
     def _get_cuml_transform_func(
-        self, dataset: DataFrame, category: str = transform_evaluate.transform
-    ) -> Tuple[_ConstructFunc, _TransformFunc, Optional[_EvaluateFunc],]:
+        self, dataset: DataFrame, eval_metric_info: Optional[EvalMetricInfo] = None
+    ) -> Tuple[
+        _ConstructFunc,
+        _TransformFunc,
+        Optional[_EvaluateFunc],
+    ]:
         model_attribute_a = self.model_attribute_a
 
         # if the common framework tries to pickle the whole class,
         # it will throw exception since dataset is not picklable.
         self.test_pickle_dataframe = dataset
+        output_cols = self.getInputCols()
 
         def _construct_dummy() -> CumlT:
             dummy = CumlDummy(a=101, b=102, k=103)
@@ -293,7 +305,8 @@ class SparkRapidsMLDummyModel(
 
             assert model_attribute_a == 1024
             if isinstance(df, pd.DataFrame):
-                return df
+                col_mapper = dict(zip(df.columns, output_cols))
+                return df.rename(columns=col_mapper)
             else:
                 # TODO: implement when adding single column test
                 raise NotImplementedError()
@@ -302,6 +315,91 @@ class SparkRapidsMLDummyModel(
 
     def _out_schema(self, input_schema: StructType) -> Union[StructType, str]:
         return input_schema
+
+
+def _test_input_setter_getter(est_class: Any) -> None:
+    if est_class().hasParam("inputCol"):
+        assert est_class(inputCol="features").getInputCol() == "features"
+        assert est_class(inputCol=["f1", "f2"]).getInputCols() == ["f1", "f2"]
+        assert est_class(inputCols=["f1", "f2"]).getInputCols() == ["f1", "f2"]
+
+        assert est_class().setInputCol("features").getInputCol() == "features"
+        assert est_class().setInputCol(["f1", "f2"]).getInputCols() == ["f1", "f2"]
+        assert est_class().setInputCols(["f1", "f2"]).getInputCols() == ["f1", "f2"]
+
+    else:
+        assert est_class().hasParam("featuresCol")
+
+        assert est_class(featuresCol="features").getFeaturesCol() == "features"
+        assert est_class(featuresCol=["f1", "f2"]).getFeaturesCols() == ["f1", "f2"]
+        assert est_class(featuresCols=["f1", "f2"]).getFeaturesCols() == ["f1", "f2"]
+
+        assert est_class().setFeaturesCol("features").getFeaturesCol() == "features"
+        assert est_class().setFeaturesCol(["f1", "f2"]).getFeaturesCols() == [
+            "f1",
+            "f2",
+        ]
+        assert est_class().setFeaturesCols(["f1", "f2"]).getFeaturesCols() == [
+            "f1",
+            "f2",
+        ]
+
+
+def _test_est_copy(
+    Estimator: Type[_CumlEstimator],
+    input_spark_params: Dict[str, Any],
+    cuml_params_update: Optional[Dict[str, Any]],
+) -> None:
+    """
+    This tests the copy() function of an estimator object.
+    For Spark-specific parameters (e.g. enable_sparse_data_optim in LogisticRegression), set cuml_params_update to None.
+    """
+
+    est = Estimator()
+    copy_params = {getattr(est, p): input_spark_params[p] for p in input_spark_params}
+    est_copy = est.copy(copy_params)
+
+    # handle Spark-Rapids-ML-only params
+    if cuml_params_update is None:
+        for param in input_spark_params:
+            assert est_copy.getOrDefault(param) == input_spark_params[param]
+        return
+
+    res_cuml_params = est.cuml_params.copy()
+    res_cuml_params.update(cuml_params_update)
+    assert (
+        est.cuml_params != res_cuml_params
+    ), "please modify cuml_params_update because it does not change the default estimator.cuml_params"
+    assert est_copy.cuml_params == res_cuml_params
+
+    # test init function
+    est_init = Estimator(**input_spark_params)
+    assert est_init.cuml_params == res_cuml_params
+
+
+def _test_model_copy(
+    gpu_model: Params,
+    cpu_model: Params,
+    input_spark_params: Dict[str, Any],
+) -> None:
+    """
+    This tests the copy() function of a model object.
+    """
+
+    gpu_attrs = {
+        getattr(gpu_model, p): input_spark_params[p] for p in input_spark_params
+    }
+    gpu_model_copy = gpu_model.copy(gpu_attrs)
+
+    cpu_attrs = {
+        getattr(cpu_model, p): input_spark_params[p] for p in input_spark_params
+    }
+    cpu_model_copy = cpu_model.copy(cpu_attrs)
+
+    for p in input_spark_params:
+        assert gpu_model_copy.getOrDefault(p) == input_spark_params[p]
+        assert gpu_model_copy.getOrDefault(p) == cpu_model_copy.getOrDefault(p)
+    return
 
 
 def test_default_cuml_params() -> None:
@@ -482,3 +580,144 @@ def test_dummy(gpu_number: int, tmp_path: str) -> None:
             for x, y in zip(ret, data):
                 for i in range(n):
                     assert x[i] == y[i]
+
+
+def test_num_workers_validation() -> None:
+    from .sparksession import CleanSparkSession
+
+    with CleanSparkSession() as spark:
+        data = [
+            [1.0, 4.0, 4.0, 4.0],
+            [2.0, 2.0, 2.0, 2.0],
+            [3.0, 3.0, 3.0, 2.0],
+            [3.0, 3.0, 3.0, 2.0],
+            [5.0, 2.0, 1.0, 3.0],
+        ]
+        m = len(data)
+        n = len(data[0])
+        input_cols = ["c1", "c2", "c3", "c4"]
+
+        df = spark.sparkContext.parallelize(data).toDF(input_cols)
+
+        dummy = SparkRapidsMLDummy(
+            inputCols=input_cols,
+            a=100,
+            num_workers=55,
+            partition_num=1,
+            m=m,
+            n=n,
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="The num_workers \(55\) should be less than or equal to spark default parallelism",
+        ):
+            dummy.fit(df)
+
+
+def test_stage_level_scheduling() -> None:
+    dummy = SparkRapidsMLDummy()
+
+    standalone_conf = (
+        SparkConf()
+        .setMaster("spark://foo")
+        .set("spark.executor.cores", "12")
+        .set("spark.task.cpus", "1")
+        .set("spark.executor.resource.gpu.amount", "1")
+        .set("spark.task.resource.gpu.amount", "0.08")
+    )
+
+    # the correct configurations should not skip stage-level scheduling
+    assert not dummy._skip_stage_level_scheduling("3.4.0", standalone_conf)
+    assert not dummy._skip_stage_level_scheduling("3.4.1", standalone_conf)
+    assert not dummy._skip_stage_level_scheduling("3.5.0", standalone_conf)
+    assert not dummy._skip_stage_level_scheduling("3.5.1", standalone_conf)
+
+    # spark version < 3.4.0
+    assert dummy._skip_stage_level_scheduling("3.3.0", standalone_conf)
+
+    # spark.executor.cores is not set
+    bad_conf = (
+        SparkConf()
+        .setMaster("spark://foo")
+        .set("spark.task.cpus", "1")
+        .set("spark.executor.resource.gpu.amount", "1")
+        .set("spark.task.resource.gpu.amount", "0.08")
+    )
+    assert dummy._skip_stage_level_scheduling("3.4.0", bad_conf)
+
+    # spark.executor.cores=1
+    bad_conf = (
+        SparkConf()
+        .setMaster("spark://foo")
+        .set("spark.executor.cores", "1")
+        .set("spark.task.cpus", "1")
+        .set("spark.executor.resource.gpu.amount", "1")
+        .set("spark.task.resource.gpu.amount", "0.08")
+    )
+    assert dummy._skip_stage_level_scheduling("3.4.0", bad_conf)
+
+    # spark.executor.resource.gpu.amount is not set
+    bad_conf = (
+        SparkConf()
+        .setMaster("spark://foo")
+        .set("spark.executor.cores", "12")
+        .set("spark.task.cpus", "1")
+        .set("spark.task.resource.gpu.amount", "0.08")
+    )
+    assert dummy._skip_stage_level_scheduling("3.4.0", bad_conf)
+
+    # spark.executor.resource.gpu.amount>1
+    bad_conf = (
+        SparkConf()
+        .setMaster("spark://foo")
+        .set("spark.executor.cores", "12")
+        .set("spark.task.cpus", "1")
+        .set("spark.executor.resource.gpu.amount", "2")
+        .set("spark.task.resource.gpu.amount", "0.08")
+    )
+    assert dummy._skip_stage_level_scheduling("3.4.0", bad_conf)
+
+    # spark.task.resource.gpu.amount is not set
+    bad_conf = (
+        SparkConf()
+        .setMaster("spark://foo")
+        .set("spark.executor.cores", "12")
+        .set("spark.task.cpus", "1")
+        .set("spark.executor.resource.gpu.amount", "1")
+    )
+    assert not dummy._skip_stage_level_scheduling("3.4.0", bad_conf)
+
+    # spark.task.resource.gpu.amount=1
+    bad_conf = (
+        SparkConf()
+        .setMaster("spark://foo")
+        .set("spark.executor.cores", "12")
+        .set("spark.task.cpus", "1")
+        .set("spark.executor.resource.gpu.amount", "1")
+        .set("spark.task.resource.gpu.amount", "1")
+    )
+    assert dummy._skip_stage_level_scheduling("3.4.0", bad_conf)
+
+    # For Yarn and K8S
+    for mode in ["yarn", "k8s://"]:
+        for gpu_amount in ["0.08", "0.2", "1.0"]:
+            conf = (
+                SparkConf()
+                .setMaster(mode)
+                .set("spark.executor.cores", "12")
+                .set("spark.task.cpus", "1")
+                .set("spark.executor.resource.gpu.amount", "1")
+                .set("spark.task.resource.gpu.amount", gpu_amount)
+            )
+            assert dummy._skip_stage_level_scheduling("3.3.0", conf)
+            assert dummy._skip_stage_level_scheduling("3.4.0", conf)
+            assert dummy._skip_stage_level_scheduling("3.4.1", conf)
+            assert dummy._skip_stage_level_scheduling("3.5.0", conf)
+
+            # This will be fixed when spark 4.0.0 is released.
+            if gpu_amount == "1.0":
+                assert dummy._skip_stage_level_scheduling("3.5.1", conf)
+            else:
+                # Starting from 3.5.1+, stage-level scheduling is working for Yarn and K8s
+                assert not dummy._skip_stage_level_scheduling("3.5.1", conf)

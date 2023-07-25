@@ -1,5 +1,9 @@
 #
+<<<<<<< HEAD
 # Copyright (c) 2023, NVIDIA CORPORATION.
+=======
+# Copyright (c) 2025, NVIDIA CORPORATION.
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,13 +18,23 @@
 # limitations under the License.
 #
 
+<<<<<<< HEAD
+=======
+import json
+import os
+from abc import ABCMeta
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
     Dict,
+<<<<<<< HEAD
     Generator,
     Iterator,
+=======
+    Iterable,
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
     List,
     Optional,
     Sequence,
@@ -31,27 +45,52 @@ from typing import (
 
 import numpy as np
 import pandas as pd
+<<<<<<< HEAD
 from pyspark import RDD
 from pyspark.ml.param.shared import HasFeaturesCol, HasLabelCol
+=======
+import pyspark
+import scipy
+from numpy.typing import ArrayLike
+from pandas import DataFrame as PandasDataFrame
+from pyspark.ml.param.shared import (
+    HasFeaturesCol,
+    HasLabelCol,
+    HasOutputCol,
+    Param,
+    Params,
+    TypeConverters,
+)
+from pyspark.ml.util import DefaultParamsReader, DefaultParamsWriter, MLReader, MLWriter
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 from pyspark.sql import Column, DataFrame
 from pyspark.sql.dataframe import DataFrame
 from pyspark.sql.types import (
     ArrayType,
     DoubleType,
     FloatType,
+<<<<<<< HEAD
+=======
+    IntegerType,
+    LongType,
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
     Row,
     StructField,
     StructType,
 )
 
+<<<<<<< HEAD
 from spark_rapids_ml.core import FitInputType, _CumlModel
 
 from .common.cuml_context import CumlContext
+=======
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 from .core import (
     CumlT,
     FitInputType,
     _ConstructFunc,
     _CumlCommon,
+<<<<<<< HEAD
     _CumlEstimatorSupervised,
     _CumlModel,
     _EvaluateFunc,
@@ -66,6 +105,37 @@ from .utils import (
     _concat_and_free,
     _get_spark_session,
     _is_local,
+=======
+    _CumlEstimator,
+    _CumlEstimatorSupervised,
+    _CumlModel,
+    _CumlModelReader,
+    _CumlModelWithColumns,
+    _CumlModelWriter,
+    _EvaluateFunc,
+    _read_csr_matrix_from_unwrapped_spark_vec,
+    _TransformFunc,
+    _use_sparse_in_cuml,
+    alias,
+    param_alias,
+)
+from .metrics import EvalMetricInfo
+from .params import (
+    DictTypeConverters,
+    HasEnableSparseDataOptim,
+    HasFeaturesCols,
+    P,
+    _CumlClass,
+    _CumlParams,
+)
+from .utils import (
+    _ArrayOrder,
+    _concat_and_free,
+    _configure_memory_resource,
+    _get_spark_session,
+    _is_local,
+    dtype_to_pyspark_type,
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
     get_logger,
 )
 
@@ -84,6 +154,10 @@ class UMAPClass(_CumlClass):
             "n_neighbors": 15,
             "n_components": 2,
             "metric": "euclidean",
+<<<<<<< HEAD
+=======
+            "metric_kwds": None,
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
             "n_epochs": None,
             "learning_rate": 1.0,
             "init": "spectral",
@@ -99,6 +173,7 @@ class UMAPClass(_CumlClass):
             "precomputed_knn": None,
             "random_state": None,
             "verbose": False,
+<<<<<<< HEAD
         }
 
 
@@ -106,11 +181,512 @@ class _UMAPCumlParams(_CumlParams, HasFeaturesCol, HasFeaturesCols, HasLabelCol)
     def __init__(self) -> None:
         super().__init__()
         self._setDefault()
+=======
+            "build_algo": "auto",
+            "build_kwds": None,
+        }
+
+    def _pyspark_class(self) -> Optional[ABCMeta]:
+        return None
+
+
+class _UMAPCumlParams(
+    _CumlParams,
+    HasFeaturesCol,
+    HasFeaturesCols,
+    HasLabelCol,
+    HasOutputCol,
+    HasEnableSparseDataOptim,
+):
+    def __init__(self) -> None:
+        super().__init__()
+        self._setDefault(
+            n_neighbors=15,
+            n_components=2,
+            metric="euclidean",
+            metric_kwds=None,
+            n_epochs=None,
+            learning_rate=1.0,
+            init="spectral",
+            min_dist=0.1,
+            spread=1.0,
+            set_op_mix_ratio=1.0,
+            local_connectivity=1.0,
+            repulsion_strength=1.0,
+            negative_sample_rate=5,
+            transform_queue_size=4.0,
+            a=None,
+            b=None,
+            random_state=None,
+            build_algo="auto",
+            build_kwds=None,
+            sample_fraction=1.0,
+            outputCol="embedding",
+        )
+
+    n_neighbors = Param(
+        Params._dummy(),
+        "n_neighbors",
+        (
+            f"The size of local neighborhood (in terms of number of neighboring sample points) used for manifold approximation."
+            f" Larger values result in more global views of the manifold, while smaller values result in more local data being"
+            f" preserved. In general values should be in the range 2 to 100."
+        ),
+        typeConverter=TypeConverters.toFloat,
+    )
+
+    n_components = Param(
+        Params._dummy(),
+        "n_components",
+        (
+            f"The dimension of the space to embed into. This defaults to 2 to provide easy visualization, but can reasonably"
+            f" be set to any integer value in the range 2 to 100."
+        ),
+        typeConverter=TypeConverters.toInt,
+    )
+
+    metric = Param(
+        Params._dummy(),
+        "metric",
+        (
+            f"Distance metric to use. Supported distances are ['l1', 'cityblock', 'taxicab', 'manhattan', 'euclidean', 'l2',"
+            f" 'sqeuclidean', 'canberra', 'minkowski', 'chebyshev', 'linf', 'cosine', 'correlation', 'hellinger', 'hamming',"
+            f" 'jaccard'] Metrics that take arguments (such as minkowski) can have arguments passed via the metric_kwds dictionary."
+            f" Note: The 'jaccard' distance metric is only supported for sparse inputs."
+        ),
+        typeConverter=TypeConverters.toString,
+    )
+
+    metric_kwds = Param(
+        Params._dummy(),
+        "metric_kwds",
+        (
+            f"Additional keyword arguments for the metric function. If the metric function takes additional arguments, they"
+            f" should be passed in this dictionary."
+        ),
+        typeConverter=DictTypeConverters._toDict,
+    )
+
+    n_epochs = Param(
+        Params._dummy(),
+        "n_epochs",
+        (
+            f"The number of training epochs to be used in optimizing the low dimensional embedding. Larger values result in"
+            f" more accurate embeddings. If None is specified a value will be selected based on the size of the input dataset"
+            f" (200 for large datasets, 500 for small)."
+        ),
+        typeConverter=TypeConverters.toInt,
+    )
+
+    learning_rate = Param(
+        Params._dummy(),
+        "learning_rate",
+        "The initial learning rate for the embedding optimization.",
+        typeConverter=TypeConverters.toFloat,
+    )
+
+    init = Param(
+        Params._dummy(),
+        "init",
+        (
+            f"How to initialize the low dimensional embedding. Options are: 'spectral': use a spectral embedding of the fuzzy"
+            f" 1-skeleton, 'random': assign initial embedding positions at random."
+        ),
+        typeConverter=TypeConverters.toString,
+    )
+
+    min_dist = Param(
+        Params._dummy(),
+        "min_dist",
+        (
+            f"The effective minimum distance between embedded points. Smaller values will result in a more clustered/clumped"
+            f" embedding where nearby points on the manifold are drawn closer together, while larger values will result in a"
+            f" more even dispersal of points. The value should be set relative to the ``spread`` value, which determines the"
+            f" scale at which embedded points will be spread out."
+        ),
+        typeConverter=TypeConverters.toFloat,
+    )
+
+    spread = Param(
+        Params._dummy(),
+        "spread",
+        (
+            f"The effective scale of embedded points. In combination with ``min_dist`` this determines how clustered/clumped"
+            f" the embedded points are."
+        ),
+        typeConverter=TypeConverters.toFloat,
+    )
+
+    set_op_mix_ratio = Param(
+        Params._dummy(),
+        "set_op_mix_ratio",
+        (
+            f"Interpolate between (fuzzy) union and intersection as the set operation used to combine local fuzzy simplicial"
+            f" sets to obtain a global fuzzy simplicial sets. Both fuzzy set operations use the product t-norm. The value of"
+            f" this parameter should be between 0.0 and 1.0; a value of 1.0 will use a pure fuzzy union, while 0.0 will use a"
+            f" pure fuzzy intersection."
+        ),
+        typeConverter=TypeConverters.toFloat,
+    )
+
+    local_connectivity = Param(
+        Params._dummy(),
+        "local_connectivity",
+        (
+            f"The local connectivity required -- i.e. the number of nearest neighbors that should be assumed to be connected"
+            f" at a local level. The higher this value the more connected the manifold becomes locally. In practice this should"
+            f" be not more than the local intrinsic dimension of the manifold."
+        ),
+        typeConverter=TypeConverters.toFloat,
+    )
+
+    repulsion_strength = Param(
+        Params._dummy(),
+        "repulsion_strength",
+        (
+            f"Weighting applied to negative samples in low dimensional embedding optimization. Values higher than one will"
+            f" result in greater weight being given to negative samples."
+        ),
+        typeConverter=TypeConverters.toFloat,
+    )
+
+    negative_sample_rate = Param(
+        Params._dummy(),
+        "negative_sample_rate",
+        (
+            f"The number of negative samples to select per positive sample in the optimization process. Increasing this value"
+            f" will result in greater repulsive force being applied, greater optimization cost, but slightly more accuracy."
+        ),
+        typeConverter=TypeConverters.toInt,
+    )
+
+    transform_queue_size = Param(
+        Params._dummy(),
+        "transform_queue_size",
+        (
+            f"For transform operations (embedding new points using a trained model), this will control how aggressively to"
+            f" search for nearest neighbors. Larger values will result in slower performance but more accurate nearest neighbor"
+            f" evaluation."
+        ),
+        typeConverter=TypeConverters.toFloat,
+    )
+
+    a = Param(
+        Params._dummy(),
+        "a",
+        (
+            f"More specific parameters controlling the embedding. If None these values are set automatically as determined by"
+            f" ``min_dist`` and ``spread``."
+        ),
+        typeConverter=TypeConverters.toFloat,
+    )
+
+    b = Param(
+        Params._dummy(),
+        "b",
+        (
+            f"More specific parameters controlling the embedding. If None these values are set automatically as determined by"
+            f" ``min_dist`` and ``spread``."
+        ),
+        typeConverter=TypeConverters.toFloat,
+    )
+
+    random_state = Param(
+        Params._dummy(),
+        "random_state",
+        (
+            f"The seed used by the random number generator during embedding initialization and during sampling used by the"
+            f" optimizer. Unfortunately, achieving a high amount of parallelism during the optimization stage often comes at"
+            f" the expense of determinism, since many floating-point additions are being made in parallel without a"
+            f" deterministic ordering. This causes slightly different results across training sessions, even when the same"
+            f" seed is used for random number generation. Setting a random_state will enable consistency of trained embeddings,"
+            f" allowing for reproducible results to 3 digits of precision, but will do so at the expense of training time and"
+            f" memory usage."
+        ),
+        typeConverter=TypeConverters.toInt,
+    )
+
+    build_algo = Param(
+        Params._dummy(),
+        "build_algo",
+        (
+            f"How to build the knn graph. Supported build algorithms are ['auto', 'brute_force_knn', 'nn_descent']. 'auto' chooses"
+            f" to run with brute force knn if number of data rows is smaller than or equal to 50K. Otherwise, runs with nn descent."
+        ),
+        typeConverter=TypeConverters.toString,
+    )
+
+    build_kwds = Param(
+        Params._dummy(),
+        "build_kwds",
+        (
+            f"Build algorithm argument {{'nnd_graph_degree': 64, 'nnd_intermediate_graph_degree': 128, 'nnd_max_iterations': 20,"
+            f" 'nnd_termination_threshold': 0.0001, 'nnd_return_distances': True, 'nnd_n_clusters': 1}} Note that nnd_n_clusters > 1"
+            f" will result in batch-building with NN Descent."
+        ),
+        typeConverter=DictTypeConverters._toDict,
+    )
+
+    sample_fraction = Param(
+        Params._dummy(),
+        "sample_fraction",
+        (
+            f"The fraction of the dataset to be used for fitting the model. Since fitting is done on a single node, very large"
+            f" datasets must be subsampled to fit within the node's memory and execute in a reasonable time. Smaller fractions"
+            f" will result in faster training, but may result in sub-optimal embeddings."
+        ),
+        typeConverter=TypeConverters.toFloat,
+    )
+
+    def getNNeighbors(self: P) -> float:
+        """
+        Gets the value of `n_neighbors`.
+        """
+        return self.getOrDefault("n_neighbors")
+
+    def setNNeighbors(self: P, value: float) -> P:
+        """
+        Sets the value of `n_neighbors`.
+        """
+        return self._set_params(n_neighbors=value)
+
+    def getNComponents(self: P) -> int:
+        """
+        Gets the value of `n_components`.
+        """
+        return self.getOrDefault("n_components")
+
+    def setNComponents(self: P, value: int) -> P:
+        """
+        Sets the value of `n_components`.
+        """
+        return self._set_params(n_components=value)
+
+    def getMetric(self: P) -> str:
+        """
+        Gets the value of `metric`.
+        """
+        return self.getOrDefault("metric")
+
+    def setMetric(self: P, value: str) -> P:
+        """
+        Sets the value of `metric`.
+        """
+        return self._set_params(metric=value)
+
+    def getMetricKwds(self: P) -> Optional[Dict[str, Any]]:
+        """
+        Gets the value of `metric_kwds`.
+        """
+        return self.getOrDefault("metric_kwds")
+
+    def setMetricKwds(self: P, value: Dict[str, Any]) -> P:
+        """
+        Sets the value of `metric_kwds`.
+        """
+        return self._set_params(metric_kwds=value)
+
+    def getNEpochs(self: P) -> int:
+        """
+        Gets the value of `n_epochs`.
+        """
+        return self.getOrDefault("n_epochs")
+
+    def setNEpochs(self: P, value: int) -> P:
+        """
+        Sets the value of `n_epochs`.
+        """
+        return self._set_params(n_epochs=value)
+
+    def getLearningRate(self: P) -> float:
+        """
+        Gets the value of `learning_rate`.
+        """
+        return self.getOrDefault("learning_rate")
+
+    def setLearningRate(self: P, value: float) -> P:
+        """
+        Sets the value of `learning_rate`.
+        """
+        return self._set_params(learning_rate=value)
+
+    def getInit(self: P) -> str:
+        """
+        Gets the value of `init`.
+        """
+        return self.getOrDefault("init")
+
+    def setInit(self: P, value: str) -> P:
+        """
+        Sets the value of `init`.
+        """
+        return self._set_params(init=value)
+
+    def getMinDist(self: P) -> float:
+        """
+        Gets the value of `min_dist`.
+        """
+        return self.getOrDefault("min_dist")
+
+    def setMinDist(self: P, value: float) -> P:
+        """
+        Sets the value of `min_dist`.
+        """
+        return self._set_params(min_dist=value)
+
+    def getSpread(self: P) -> float:
+        """
+        Gets the value of `spread`.
+        """
+        return self.getOrDefault("spread")
+
+    def setSpread(self: P, value: float) -> P:
+        """
+        Sets the value of `spread`.
+        """
+        return self._set_params(spread=value)
+
+    def getSetOpMixRatio(self: P) -> float:
+        """
+        Gets the value of `set_op_mix_ratio`.
+        """
+        return self.getOrDefault("set_op_mix_ratio")
+
+    def setSetOpMixRatio(self: P, value: float) -> P:
+        """
+        Sets the value of `set_op_mix_ratio`.
+        """
+        return self._set_params(set_op_mix_ratio=value)
+
+    def getLocalConnectivity(self: P) -> float:
+        """
+        Gets the value of `local_connectivity`.
+        """
+        return self.getOrDefault("local_connectivity")
+
+    def setLocalConnectivity(self: P, value: float) -> P:
+        """
+        Sets the value of `local_connectivity`.
+        """
+        return self._set_params(local_connectivity=value)
+
+    def getRepulsionStrength(self: P) -> float:
+        """
+        Gets the value of `repulsion_strength`.
+        """
+        return self.getOrDefault("repulsion_strength")
+
+    def setRepulsionStrength(self: P, value: float) -> P:
+        """
+        Sets the value of `repulsion_strength`.
+        """
+        return self._set_params(repulsion_strength=value)
+
+    def getNegativeSampleRate(self: P) -> int:
+        """
+        Gets the value of `negative_sample_rate`.
+        """
+        return self.getOrDefault("negative_sample_rate")
+
+    def setNegativeSampleRate(self: P, value: int) -> P:
+        """
+        Sets the value of `negative_sample_rate`.
+        """
+        return self._set_params(negative_sample_rate=value)
+
+    def getTransformQueueSize(self: P) -> float:
+        """
+        Gets the value of `transform_queue_size`.
+        """
+        return self.getOrDefault("transform_queue_size")
+
+    def setTransformQueueSize(self: P, value: float) -> P:
+        """
+        Sets the value of `transform_queue_size`.
+        """
+        return self._set_params(transform_queue_size=value)
+
+    def getA(self: P) -> float:
+        """
+        Gets the value of `a`.
+        """
+        return self.getOrDefault("a")
+
+    def setA(self: P, value: float) -> P:
+        """
+        Sets the value of `a`.
+        """
+        return self._set_params(a=value)
+
+    def getB(self: P) -> float:
+        """
+        Gets the value of `b`.
+        """
+        return self.getOrDefault("b")
+
+    def setB(self: P, value: float) -> P:
+        """
+        Sets the value of `b`.
+        """
+        return self._set_params(b=value)
+
+    def getRandomState(self: P) -> int:
+        """
+        Gets the value of `random_state`.
+        """
+        return self.getOrDefault("random_state")
+
+    def setRandomState(self: P, value: int) -> P:
+        """
+        Sets the value of `random_state`.
+        """
+        return self._set_params(random_state=value)
+
+    def getBuildAlgo(self: P) -> str:
+        """
+        Gets the value of `build_algo`.
+        """
+        return self.getOrDefault("build_algo")
+
+    def setBuildAlgo(self: P, value: str) -> P:
+        """
+        Sets the value of `build_algo`.
+        """
+        return self._set_params(build_algo=value)
+
+    def getBuildKwds(self: P) -> Optional[Dict[str, Any]]:
+        """
+        Gets the value of `build_kwds`.
+        """
+        return self.getOrDefault("build_kwds")
+
+    def setBuildKwds(self: P, value: Dict[str, Any]) -> P:
+        """
+        Sets the value of `build_kwds`.
+        """
+        return self._set_params(build_kwds=value)
+
+    def getSampleFraction(self: P) -> float:
+        """
+        Gets the value of `sample_fraction`.
+        """
+        return self.getOrDefault("sample_fraction")
+
+    def setSampleFraction(self: P, value: float) -> P:
+        """
+        Sets the value of `sample_fraction`.
+        """
+        return self._set_params(sample_fraction=value)
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
     def getFeaturesCol(self) -> Union[str, List[str]]:  # type: ignore
         """
         Gets the value of :py:attr:`featuresCol` or :py:attr:`featuresCols`
         """
+<<<<<<< HEAD
+=======
+
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
         if self.isDefined(self.featuresCols):
             return self.getFeaturesCols()
         elif self.isDefined(self.featuresCol):
@@ -123,26 +699,55 @@ class _UMAPCumlParams(_CumlParams, HasFeaturesCol, HasFeaturesCols, HasLabelCol)
         Sets the value of :py:attr:`featuresCol` or :py:attr:`featuresCols`. Used when input vectors are stored in a single column.
         """
         if isinstance(value, str):
+<<<<<<< HEAD
             self.set_params(featuresCol=value)
         else:
             self.set_params(featuresCols=value)
+=======
+            self._set_params(featuresCol=value)
+        else:
+            self._set_params(featuresCols=value)
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
         return self
 
     def setFeaturesCols(self: P, value: List[str]) -> P:
         """
         Sets the value of :py:attr:`featuresCols`. Used when input vectors are stored as multiple feature columns.
         """
+<<<<<<< HEAD
         return self.set_params(featuresCols=value)
+=======
+        return self._set_params(featuresCols=value)
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
     def setLabelCol(self: P, value: str) -> P:
         """
         Sets the value of :py:attr:`labelCol`.
         """
+<<<<<<< HEAD
         return self.set_params(labelCol=value)
 
 
 class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
 
+=======
+        return self._set_params(labelCol=value)
+
+    def getOutputCol(self: P) -> str:
+        """
+        Gets the value of :py:attr:`outputCol`. Contains the embeddings of the input data.
+        """
+        return self.getOrDefault("outputCol")
+
+    def setOutputCol(self: P, value: str) -> P:
+        """
+        Sets the value of :py:attr:`outputCol`. Contains the embeddings of the input data.
+        """
+        return self._set_params(outputCol=value)
+
+
+class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
     """
     Uniform Manifold Approximation and Projection (UMAP) is a dimension reduction technique
     used for low-dimensional data visualization and general non-linear dimension reduction.
@@ -168,6 +773,13 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
         'hamming', 'jaccard']. Metrics that take arguments (such as minkowski) can have arguments passed via the
         metric_kwds dictionary.
 
+<<<<<<< HEAD
+=======
+    metric_kwds : dict (optional, default=None)
+        Additional keyword arguments for the metric function. If the metric function takes additional arguments,
+        they should be passed in this dictionary.
+
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
     n_epochs : int (optional, default=None)
         The number of training epochs to be used in optimizing the low dimensional embedding. Larger values result
         in more accurate embeddings. If None is specified a value will be selected based on the size of the input dataset
@@ -227,11 +839,24 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
         Either one of a tuple (indices, distances) of arrays of shape (n_samples, n_neighbors), a pairwise distances
         dense array of shape (n_samples, n_samples) or a KNN graph sparse array (preferably CSR/COO). This feature
         allows the precomputation of the KNN outside of UMAP and also allows the use of a custom distance function.
+<<<<<<< HEAD
         This function should match the metric used to train the UMAP embeedings.
 
     random_state : int, RandomState instance (optional, default=None)
         If set to a non-zero value, this will ensure reproducible results during fit(). Note that transform() is
         inherently stochastic and may yield slightly varied embedding results.
+=======
+        This function should match the metric used to train the UMAP embeedings. Note: supplying a precomputed KNN graph
+        with sample_fraction < 1.0 is not supported, as the KNN graph must be built on the same subset used to fit the model.
+
+    random_state : int, RandomState instance (optional, default=None)
+        The seed used by the random number generator during embedding initialization and during sampling used by the
+        optimizer. Unfortunately, achieving a high amount of parallelism during the optimization stage often comes at
+        the expense of determinism, since many floating-point additions are being made in parallel without a deterministic
+        ordering. This causes slightly different results across training sessions, even when the same seed is used for
+        random number generation. Setting a random_state will enable consistency of trained embeddings, allowing for
+        reproducible results to 3 digits of precision, but will do so at the expense of training time and memory usage.
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
     verbose :
         Logging level.
@@ -243,6 +868,7 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
             * ``5 or True`` - Enables all messages up to and including debug messages.
             * ``6`` - Enables all messages up to and including trace messages.
 
+<<<<<<< HEAD
     sample_fraction : float (optional, default=1.0)
         The fraction of the dataset to be used for fitting the model. Since fitting is done on a single node, very large
         datasets must be subsampled to fit within the node's memory and execute in a reasonable time. Smaller fractions
@@ -255,11 +881,43 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
     featuresCols: List[str]
         The names of the columns that contain input vectors. featuresCols should be set when input vectors are stored
         in multiple columns of a dataframe.
+=======
+    build_algo : str (optional, default='auto')
+        How to build the knn graph. Supported build algorithms are ['auto', 'brute_force_knn', 'nn_descent']. 'auto' chooses
+        to run with brute force knn if number of data rows is smaller than or equal to 50K. Otherwise, runs with nn descent.
+
+    build_kwds : dict (optional, default=None)
+        Build algorithm argument {'nnd_graph_degree': 64, 'nnd_intermediate_graph_degree': 128, 'nnd_max_iterations': 20,
+        'nnd_termination_threshold': 0.0001, 'nnd_return_distances': True, 'nnd_n_clusters': 1} Note that nnd_n_clusters > 1
+        will result in batch-building with NN Descent.
+
+    sample_fraction : float (optional, default=1.0)
+        The fraction of the dataset to be used for fitting the model. Since fitting is done on a single node, very large
+        datasets must be subsampled to fit within the node's memory. Smaller fractions will result in faster training, but
+        may decrease embedding quality. Note: this is not guaranteed to provide exactly the fraction specified of the total
+        count of the given DataFrame.
+
+    featuresCol: str or List[str]
+        The feature column names, spark-rapids-ml supports vector, array and columnar as the input.\n
+            * When the value is a string, the feature columns must be assembled into 1 column with vector or array type.
+            * When the value is a list of strings, the feature columns must be numeric types.
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
     labelCol: str (optional)
         The name of the column that contains labels. If provided, supervised fitting will be performed, where labels
         will be taken into account when optimizing the embedding.
 
+<<<<<<< HEAD
+=======
+    outputCol: str (optional)
+        The name of the column that contains embeddings. If not provided, the default name of "embedding" will be used.
+
+    num_workers:
+        Number of cuML workers, where each cuML worker corresponds to one Spark task
+        running on one GPU. If not set, spark-rapids-ml tries to infer the number of
+        cuML workers (i.e. GPUs in cluster) from the Spark environment.
+
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
     Examples
     --------
     >>> from spark_rapids_ml.umap import UMAP
@@ -268,7 +926,11 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
 
     >>> X, _ = make_blobs(500, 5, centers=42, cluster_std=0.1, dtype=np.float32, random_state=10)
     >>> feature_cols = [f"c{i}" for i in range(X.shape[1])]
+<<<<<<< HEAD
     >>> schema = [f"{c} {"float"}" for c in feature_cols]
+=======
+    >>> schema = [f"{c} {'float'}" for c in feature_cols]
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
     >>> df = spark.createDataFrame(X.tolist(), ",".join(schema))
     >>> df = df.withColumn("features", array(*feature_cols)).drop(*feature_cols)
     >>> df.show(10, False)
@@ -287,6 +949,10 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
     |[9.317718, 1.3419528, -4.832837, 4.5362573, 6.9357944]  |
     |[-6.65039, -5.438729, -6.858565, 2.9733503, 3.99863]    |
     +--------------------------------------------------------+
+<<<<<<< HEAD
+=======
+
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
     only showing top 10 rows
 
     >>> umap_estimator = UMAP(sample_fraction=0.5, num_workers=3).setFeaturesCol("features")
@@ -310,20 +976,81 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
 
     """
 
+<<<<<<< HEAD
     def __init__(self, sample_fraction: float = 1.0, **kwargs: Any) -> None:
         super().__init__()
         self.set_params(**kwargs)
         self.sample_fraction = sample_fraction
         self.maxRecordsPerBatch = 10000
+=======
+    @pyspark.keyword_only
+    def __init__(
+        self,
+        *,
+        n_neighbors: Optional[float] = 15,
+        n_components: Optional[int] = 15,
+        metric: str = "euclidean",
+        metric_kwds: Optional[Dict[str, Any]] = None,
+        n_epochs: Optional[int] = None,
+        learning_rate: Optional[float] = 1.0,
+        init: Optional[str] = "spectral",
+        min_dist: Optional[float] = 0.1,
+        spread: Optional[float] = 1.0,
+        set_op_mix_ratio: Optional[float] = 1.0,
+        local_connectivity: Optional[float] = 1.0,
+        repulsion_strength: Optional[float] = 1.0,
+        negative_sample_rate: Optional[int] = 5,
+        transform_queue_size: Optional[float] = 1.0,
+        a: Optional[float] = None,
+        b: Optional[float] = None,
+        precomputed_knn: Optional[Union[ArrayLike, Tuple[ArrayLike, ArrayLike]]] = None,
+        random_state: Optional[int] = None,
+        build_algo: Optional[str] = "auto",
+        build_kwds: Optional[Dict[str, Any]] = None,
+        sample_fraction: Optional[float] = 1.0,
+        featuresCol: Optional[Union[str, List[str]]] = None,
+        labelCol: Optional[str] = None,
+        outputCol: Optional[str] = None,
+        num_workers: Optional[int] = None,
+        enable_sparse_data_optim: Optional[
+            bool
+        ] = None,  # will enable SparseVector inputs if first row is sparse (for any metric).
+        **kwargs: Any,
+    ) -> None:
+        super().__init__()
+        if not self._input_kwargs.get("float32_inputs", True):
+            get_logger(self.__class__).warning(
+                "This estimator does not support double precision inputs. Setting float32_inputs to False will be ignored."
+            )
+            self._input_kwargs.pop("float32_inputs")
+        self._set_params(**self._input_kwargs)
+        max_records_per_batch_str = _get_spark_session().conf.get(
+            "spark.sql.execution.arrow.maxRecordsPerBatch", "10000"
+        )
+        assert max_records_per_batch_str is not None
+        self.max_records_per_batch = int(max_records_per_batch_str)
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
     def _create_pyspark_model(self, result: Row) -> _CumlModel:
         raise NotImplementedError("UMAP does not support model creation from Row")
 
     def _fit(self, dataset: DataFrame) -> "UMAPModel":
+<<<<<<< HEAD
         if self.sample_fraction < 1.0:
             data_subset = dataset.sample(
                 withReplacement=False,
                 fraction=self.sample_fraction,
+=======
+        if self.getSampleFraction() < 1.0:
+            if self.cuml_params["precomputed_knn"] is not None:
+                raise ValueError(
+                    f"Both precomputed_knn and sample_fraction < 1.0 cannot be used simultaneously, as the KNN graph must be built on the same subset used to fit the model."
+                )
+
+            data_subset = dataset.sample(
+                withReplacement=False,
+                fraction=self.getSampleFraction(),
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
                 seed=self.cuml_params["random_state"],
             )
         else:
@@ -333,6 +1060,7 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
         # Force to single partition, single worker
         self._num_workers = 1
         if data_subset.rdd.getNumPartitions() != 1:
+<<<<<<< HEAD
             data_subset = data_subset.repartition(1)
 
         maxRecordsPerBatch_str = _get_spark_session().conf.get(
@@ -342,10 +1070,19 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
         self.maxRecordsPerBatch = int(maxRecordsPerBatch_str)
 
         pipelined_rdd = self._call_cuml_fit_func(
+=======
+            get_logger(self.__class__).info(
+                "Coalescing input data(sub)set to one partition for fit()."
+            )
+            data_subset = data_subset.coalesce(1)
+
+        df_output = self._call_cuml_fit_func_dataframe(
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
             dataset=data_subset,
             partially_collect=False,
             paramMaps=None,
         )
+<<<<<<< HEAD
         rows = pipelined_rdd.collect()
         # Collect and concatenate row-by-row fit results
         from itertools import chain
@@ -353,16 +1090,55 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
         embeddings = list(chain.from_iterable([row["embedding_"] for row in rows]))
         raw_data = list(chain.from_iterable([row["raw_data_"] for row in rows]))
         del rows
+=======
+
+        pdf_output: PandasDataFrame = df_output.toPandas()
+
+        if self._sparse_fit:
+            embeddings = np.array(
+                list(
+                    pd.concat(
+                        [pd.Series(x) for x in pdf_output["embedding_"]],
+                        ignore_index=True,
+                    )
+                ),
+                dtype=np.float32,
+            )
+            pdf_output["raw_data_"] = pdf_output.apply(
+                lambda row: scipy.sparse.csr_matrix(
+                    (row["data"], row["indices"], row["indptr"]),
+                    shape=row["shape"],
+                ).astype(np.float32),
+                axis=1,
+            )
+            raw_data = scipy.sparse.vstack(pdf_output["raw_data_"], format="csr")
+        else:
+            embeddings = np.vstack(pdf_output["embedding_"]).astype(np.float32)
+            raw_data = np.vstack(pdf_output["raw_data_"]).astype(np.float32)  # type: ignore
+
+        del pdf_output
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
         model = UMAPModel(
             embedding_=embeddings,
             raw_data_=raw_data,
+<<<<<<< HEAD
             n_cols=len(raw_data[0]),
             dtype=type(raw_data[0][0]).__name__,
+=======
+            sparse_fit=self._sparse_fit,
+            n_cols=self._n_cols,
+            dtype="float32",  # UMAP only supports float
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
         )
 
         model._num_workers = input_num_workers
 
+<<<<<<< HEAD
+=======
+        # We don't need the precomputed knn anymore
+        self.cuml_params["precomputed_knn"] = None
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
         self._copyValues(model)
         self._copy_cuml_params(model)  # type: ignore
 
@@ -371,6 +1147,7 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
     def _fit_array_order(self) -> _ArrayOrder:
         return "C"
 
+<<<<<<< HEAD
     def _get_cuml_fit_func(  # type: ignore
         self, dataset: DataFrame
     ) -> Callable[[FitInputType, Dict[str, Any]], Dict[str, Any],]:
@@ -380,18 +1157,30 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
         pass
 
     def _get_cuml_fit_generator_func(
+=======
+    def _get_cuml_fit_func(
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
         self,
         dataset: DataFrame,
         extra_params: Optional[List[Dict[str, Any]]] = None,
     ) -> Callable[
+<<<<<<< HEAD
         [FitInputType, Dict[str, Any]], Generator[Dict[str, Any], None, None]
+=======
+        [FitInputType, Dict[str, Any]],
+        Dict[str, Any],
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
     ]:
         array_order = self._fit_array_order()
 
         def _cuml_fit(
             dfs: FitInputType,
             params: Dict[str, Any],
+<<<<<<< HEAD
         ) -> Generator[Dict[str, Any], None, None]:
+=======
+        ) -> Dict[str, Any]:
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
             from cuml.manifold import UMAP as CumlUMAP
 
             umap_object = CumlUMAP(
@@ -419,6 +1208,7 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
             embedding = umap_model.embedding_
             del umap_model
 
+<<<<<<< HEAD
             chunkSize = self.maxRecordsPerBatch
             num_sections = (len(embedding) + chunkSize - 1) // chunkSize
 
@@ -439,11 +1229,193 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
 
     def _use_fit_generator(self) -> bool:
         return True
+=======
+            return {"embedding": embedding, "raw_data": concated}
+
+        return _cuml_fit
+
+    def _call_cuml_fit_func_dataframe(
+        self,
+        dataset: DataFrame,
+        partially_collect: bool = True,
+        paramMaps: Optional[Sequence["ParamMap"]] = None,
+    ) -> DataFrame:
+        """
+        Fits a model to the input dataset. This replaces _call_cuml_fit_func() to omit barrier stages and return a dataframe
+        rather than an RDD.
+
+        Parameters
+        ----------
+        dataset : :py:class:`pyspark.sql.DataFrame`
+            input dataset
+
+        Returns
+        -------
+        output : :py:class:`pyspark.sql.DataFrame`
+            fitted model attributes
+        """
+
+        cls = self.__class__
+
+        select_cols, multi_col_names, dimension, _ = self._pre_process_data(dataset)
+        self._n_cols = dimension
+
+        dataset = dataset.select(*select_cols)
+
+        is_local = _is_local(_get_spark_session().sparkContext)
+
+        cuda_managed_mem_enabled = (
+            _get_spark_session().conf.get("spark.rapids.ml.uvm.enabled", "false")
+            == "true"
+        )
+        if cuda_managed_mem_enabled:
+            get_logger(cls).info("CUDA managed memory enabled.")
+
+        # parameters passed to subclass
+        params: Dict[str, Any] = {
+            param_alias.cuml_init: self.cuml_params,
+        }
+
+        params[param_alias.fit_multiple_params] = []
+
+        cuml_fit_func = self._get_cuml_fit_func(dataset, None)
+
+        array_order = self._fit_array_order()
+
+        cuml_verbose = self.cuml_params.get("verbose", False)
+
+        use_sparse_array = _use_sparse_in_cuml(dataset)
+        self._sparse_fit = use_sparse_array  # param stored internally by cuml model
+        if self.cuml_params.get("metric") == "jaccard" and not use_sparse_array:
+            raise ValueError("Metric 'jaccard' not supported for dense inputs.")
+
+        chunk_size = self.max_records_per_batch
+
+        def _train_udf(pdf_iter: Iterable[pd.DataFrame]) -> Iterable[pd.DataFrame]:
+            from pyspark import TaskContext
+
+            logger = get_logger(cls)
+            logger.info("Initializing cuml context")
+
+            import cupy as cp
+            import cupyx
+
+            _CumlCommon._initialize_cuml_logging(cuml_verbose)
+
+            context = TaskContext.get()
+
+            # set gpu device
+            _CumlCommon._set_gpu_device(context, is_local)
+
+            # must do after setting gpu device
+            _configure_memory_resource(cuda_managed_mem_enabled)
+
+            # handle the input
+            # inputs = [(X, Optional(y)), (X, Optional(y))]
+            logger.info("Loading data into python worker memory")
+            inputs: List[Any] = []
+            sizes: List[int] = []
+
+            for pdf in pdf_iter:
+                sizes.append(pdf.shape[0])
+                if multi_col_names:
+                    features = np.array(pdf[multi_col_names], order=array_order)
+                elif use_sparse_array:
+                    # sparse vector input
+                    features = _read_csr_matrix_from_unwrapped_spark_vec(pdf)
+                else:
+                    # dense input
+                    features = np.array(list(pdf[alias.data]), order=array_order)
+                if cuda_managed_mem_enabled and not use_sparse_array:
+                    features = cp.array(features)
+
+                label = pdf[alias.label] if alias.label in pdf.columns else None
+                row_number = (
+                    pdf[alias.row_number] if alias.row_number in pdf.columns else None
+                )
+                inputs.append((features, label, row_number))
+
+            if cuda_managed_mem_enabled and use_sparse_array:
+                concated_nnz = sum(triplet[0].nnz for triplet in inputs)  # type: ignore
+                if concated_nnz > np.iinfo(np.int32).max:
+                    logger.warn(
+                        f"The number of non-zero values of a partition exceeds the int32 index dtype. \
+                        cupyx csr_matrix currently does not support int64 indices (https://github.com/cupy/cupy/issues/3513); \
+                        keeping as scipy csr_matrix to avoid overflow."
+                    )
+                else:
+                    inputs = [
+                        (cupyx.scipy.sparse.csr_matrix(row[0]), row[1], row[2])
+                        for row in inputs
+                    ]
+
+            # call the cuml fit function
+            # *note*: cuml_fit_func may delete components of inputs to free
+            # memory.  do not rely on inputs after this call.
+            embedding, raw_data = cuml_fit_func(inputs, params).values()
+
+            logger.info("Cuml fit complete")
+
+            num_sections = (len(embedding) + chunk_size - 1) // chunk_size
+
+            for i in range(num_sections):
+                start = i * chunk_size
+                end = min((i + 1) * chunk_size, len(embedding))
+                if use_sparse_array:
+                    csr_chunk = raw_data[start:end]
+                    indices = csr_chunk.indices
+                    indptr = csr_chunk.indptr
+                    data = csr_chunk.data
+                    if cuda_managed_mem_enabled:
+                        yield pd.DataFrame(
+                            data=[
+                                {
+                                    "embedding_": list(embedding[start:end].get()),
+                                    "indices": list(indices.get()),
+                                    "indptr": list(indptr.get()),
+                                    "data": list(data.get()),
+                                    "shape": [end - start, dimension],
+                                }
+                            ]
+                        )
+                    else:
+                        yield pd.DataFrame(
+                            data=[
+                                {
+                                    "embedding_": list(embedding[start:end]),
+                                    "indices": list(indices),
+                                    "indptr": list(indptr),
+                                    "data": list(data),
+                                    "shape": [end - start, dimension],
+                                }
+                            ]
+                        )
+                else:
+                    if cuda_managed_mem_enabled:
+                        yield pd.DataFrame(
+                            {
+                                "embedding_": list(embedding[start:end].get()),
+                                "raw_data_": list(raw_data[start:end].get()),
+                            }
+                        )
+                    else:
+                        yield pd.DataFrame(
+                            {
+                                "embedding_": list(embedding[start:end]),
+                                "raw_data_": list(raw_data[start:end]),
+                            }
+                        )
+
+        output_df = dataset.mapInPandas(_train_udf, schema=self._out_schema())
+
+        return output_df
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
     def _require_nccl_ucx(self) -> Tuple[bool, bool]:
         return (False, False)
 
     def _out_schema(self) -> Union[StructType, str]:
+<<<<<<< HEAD
         return StructType(
             [
                 StructField(
@@ -458,6 +1430,29 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
                 ),
             ]
         )
+=======
+        if self._sparse_fit:
+            return StructType(
+                [
+                    StructField(
+                        "embedding_",
+                        ArrayType(ArrayType(FloatType(), False), False),
+                        False,
+                    ),
+                    StructField("indices", ArrayType(IntegerType(), False), False),
+                    StructField("indptr", ArrayType(IntegerType(), False), False),
+                    StructField("data", ArrayType(FloatType(), False), False),
+                    StructField("shape", ArrayType(IntegerType(), False), False),
+                ]
+            )
+        else:
+            return StructType(
+                [
+                    StructField("embedding_", ArrayType(FloatType()), False),
+                    StructField("raw_data_", ArrayType(FloatType()), False),
+                ]
+            )
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
     def _pre_process_data(
         self, dataset: DataFrame
@@ -479,22 +1474,39 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
         return select_cols, multi_col_names, dimension, feature_type
 
 
+<<<<<<< HEAD
 class UMAPModel(_CumlModel, UMAPClass, _UMAPCumlParams):
     def __init__(
         self,
         embedding_: List[List[float]],
         raw_data_: List[List[float]],
+=======
+class UMAPModel(_CumlModelWithColumns, UMAPClass, _UMAPCumlParams):
+    def __init__(
+        self,
+        embedding_: np.ndarray,
+        raw_data_: Union[
+            np.ndarray,
+            scipy.sparse.csr_matrix,
+        ],
+        sparse_fit: bool,
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
         n_cols: int,
         dtype: str,
     ) -> None:
         super(UMAPModel, self).__init__(
             embedding_=embedding_,
             raw_data_=raw_data_,
+<<<<<<< HEAD
+=======
+            sparse_fit=sparse_fit,
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
             n_cols=n_cols,
             dtype=dtype,
         )
         self.embedding_ = embedding_
         self.raw_data_ = raw_data_
+<<<<<<< HEAD
 
     @property
     def embedding(self) -> List[List[float]]:
@@ -515,6 +1527,170 @@ class UMAPModel(_CumlModel, UMAPClass, _UMAPCumlParams):
             df: Union[pd.DataFrame, np.ndarray],
         ) -> pd.Series:
             raise NotImplementedError("TODO")
+=======
+        self._sparse_fit = sparse_fit  # If true, raw data is a sparse CSR matrix
+        self.BROADCAST_LIMIT = 8 << 30  # Spark broadcast limit: 8GiB
+
+    @property
+    def embedding(self) -> np.ndarray:
+        """
+        Returns the model embeddings.
+        """
+        return (
+            self.embedding_
+        )  # TBD: return a more Spark-like object, e.g. DenseMatrix?
+
+    @property
+    def rawData(self) -> Union[np.ndarray, scipy.sparse.csr_matrix]:
+        """
+        Returns the raw data used to fit the model. If the input data was sparse, this will be a scipy csr matrix.
+        """
+        return (
+            self.raw_data_
+        )  # TBD: return a more Spark-like object, e.g. DenseMatrix or SparseMatrix?
+
+    def _get_cuml_transform_func(
+        self, dataset: DataFrame, eval_metric_info: Optional[EvalMetricInfo] = None
+    ) -> Tuple[
+        _ConstructFunc,
+        _TransformFunc,
+        Optional[_EvaluateFunc],
+    ]:
+        cuml_alg_params = self.cuml_params
+        sparse_fit = self._sparse_fit
+        n_cols = self.n_cols
+
+        def _chunk_and_broadcast(
+            sc: pyspark.SparkContext,
+            arr: np.ndarray,
+            BROADCAST_LIMIT: int,
+        ) -> List[pyspark.broadcast.Broadcast]:
+            """
+            Broadcast the input array, chunking it into smaller arrays if it exceeds the broadcast limit.
+            """
+            if arr.nbytes < BROADCAST_LIMIT:
+                return [sc.broadcast(arr)]
+
+            rows_per_chunk = BROADCAST_LIMIT // (arr.nbytes // arr.shape[0])
+            if rows_per_chunk == 0:
+                raise ValueError(
+                    f"Array cannot be chunked into broadcastable pieces: \
+                        single row exceeds broadcast limit ({BROADCAST_LIMIT} bytes)"
+                )
+            num_chunks = (arr.shape[0] + rows_per_chunk - 1) // rows_per_chunk
+            return [
+                sc.broadcast(arr[i * rows_per_chunk : (i + 1) * rows_per_chunk])
+                for i in range(num_chunks)
+            ]
+
+        spark = _get_spark_session()
+        broadcast_embeddings = _chunk_and_broadcast(
+            spark.sparkContext, self.embedding_, self.BROADCAST_LIMIT
+        )
+
+        if isinstance(self.raw_data_, scipy.sparse.csr_matrix):
+            broadcast_raw_data = {
+                "indices": _chunk_and_broadcast(
+                    spark.sparkContext, self.raw_data_.indices, self.BROADCAST_LIMIT
+                ),
+                "indptr": _chunk_and_broadcast(
+                    spark.sparkContext, self.raw_data_.indptr, self.BROADCAST_LIMIT
+                ),
+                "data": _chunk_and_broadcast(
+                    spark.sparkContext, self.raw_data_.data, self.BROADCAST_LIMIT
+                ),
+            }  # NOTE: CSR chunks are not independently meaningful; do not use until recombined.
+        else:
+            broadcast_raw_data = _chunk_and_broadcast(
+                spark.sparkContext, self.raw_data_, self.BROADCAST_LIMIT
+            )  # type: ignore
+
+        def _construct_umap() -> CumlT:
+            import cupy as cp
+            from cuml.common import SparseCumlArray
+            from cuml.common.sparse_utils import is_sparse
+            from cuml.manifold import UMAP as CumlUMAP
+
+            from .utils import cudf_to_cuml_array
+
+            nonlocal broadcast_embeddings, broadcast_raw_data
+
+            assert isinstance(broadcast_embeddings, list)
+            embedding = (
+                broadcast_embeddings[0].value
+                if len(broadcast_embeddings) == 1
+                else np.concatenate([chunk.value for chunk in broadcast_embeddings])
+            )
+
+            if sparse_fit:
+                if not isinstance(broadcast_raw_data, dict):
+                    raise ValueError("Expected raw data as a CSR dict for sparse fit.")
+                indices = np.concatenate(
+                    [chunk.value for chunk in broadcast_raw_data["indices"]]
+                )
+                indptr = np.concatenate(
+                    [chunk.value for chunk in broadcast_raw_data["indptr"]]
+                )
+                data = np.concatenate(
+                    [chunk.value for chunk in broadcast_raw_data["data"]]
+                )
+                raw_data = scipy.sparse.csr_matrix(
+                    (data, indices, indptr), shape=(len(indptr) - 1, n_cols)
+                )
+            else:
+                if not isinstance(broadcast_raw_data, list):
+                    raise ValueError(
+                        "Expected raw data as list (of lists) for dense fit."
+                    )
+                raw_data = (
+                    broadcast_raw_data[0].value
+                    if len(broadcast_raw_data) == 1
+                    else np.concatenate([chunk.value for chunk in broadcast_raw_data])
+                )
+
+            del broadcast_embeddings
+            del broadcast_raw_data
+
+            if embedding.dtype != np.float32:
+                embedding = embedding.astype(np.float32)
+                raw_data = raw_data.astype(np.float32)
+
+            if is_sparse(raw_data):
+                raw_data_cuml = SparseCumlArray(
+                    raw_data,
+                )
+            else:
+                raw_data_cuml = cudf_to_cuml_array(
+                    raw_data,
+                    order="C",
+                )
+
+            internal_model = CumlUMAP(**cuml_alg_params)
+            internal_model.embedding_ = cp.array(embedding).data
+            internal_model._raw_data = raw_data_cuml
+            internal_model.sparse_fit = sparse_fit
+
+            return internal_model
+
+        def _transform_internal(
+            umap: CumlT,
+            df: Union[pd.DataFrame, np.ndarray, scipy.sparse._csr.csr_matrix],
+        ) -> pd.DataFrame:
+
+            embedding = umap.transform(df)
+
+            # Input is either numpy array or pandas dataframe
+            emb_list = [
+                (
+                    embedding[i, :]
+                    if isinstance(embedding, np.ndarray)
+                    else embedding.iloc[i, :]
+                )
+                for i in range(embedding.shape[0])
+            ]
+
+            return pd.Series(emb_list)
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
         return _construct_umap, _transform_internal, None
 
@@ -522,4 +1698,178 @@ class UMAPModel(_CumlModel, UMAPClass, _UMAPCumlParams):
         return (False, False)
 
     def _out_schema(self, input_schema: StructType) -> Union[StructType, str]:
+<<<<<<< HEAD
         raise NotImplementedError("TODO")
+=======
+        assert self.dtype is not None
+        pyspark_type = dtype_to_pyspark_type(self.dtype)
+        return f"array<{pyspark_type}>"
+
+    def write(self) -> MLWriter:
+        return _CumlModelWriterParquet(self)
+
+    @classmethod
+    def read(cls) -> MLReader:
+        return _CumlModelReaderParquet(cls)
+
+
+class _CumlModelWriterParquet(_CumlModelWriter):
+    """
+    Override parent writer to write _CumlModel array attributes to Spark Dataframe as parquet
+    """
+
+    def saveImpl(self, path: str) -> None:
+
+        spark = _get_spark_session()
+
+        def write_sparse_array(
+            array: scipy.sparse.spmatrix, df_dir: str, mode: str
+        ) -> None:
+            indptr_schema = StructType([StructField("indptr", IntegerType(), False)])
+            indptr_df = spark.createDataFrame(
+                pd.DataFrame(array.indptr), schema=indptr_schema
+            )
+
+            indices_data_schema = StructType(
+                [
+                    StructField("indices", IntegerType(), False),
+                    StructField("data", FloatType(), False),
+                    StructField("row_id", LongType(), False),
+                ]
+            )
+            indices_data_df = spark.createDataFrame(
+                pd.DataFrame(
+                    {
+                        "indices": array.indices,
+                        "data": array.data,
+                        "row_id": range(len(array.indices)),
+                    }
+                ),
+                schema=indices_data_schema,
+            )
+
+            indptr_df.write.parquet(os.path.join(df_dir, "indptr.parquet"), mode=mode)
+            indices_data_df.write.parquet(
+                os.path.join(df_dir, "indices_data.parquet"), mode=mode
+            )
+
+        def write_dense_array(array: np.ndarray, df_path: str, mode: str) -> None:
+            assert (
+                spark.conf.get("spark.sql.execution.arrow.pyspark.enabled") == "true"
+            ), "spark.sql.execution.arrow.pyspark.enabled must be set to true to persist array attributes"
+
+            schema = StructType(
+                [
+                    StructField("row_id", LongType(), False),
+                    StructField("data", ArrayType(FloatType(), False), False),
+                ]
+            )
+            data_df = spark.createDataFrame(
+                pd.DataFrame(
+                    {
+                        "row_id": range(array.shape[0]),
+                        "data": list(array),
+                    }
+                ),
+                schema=schema,
+            )
+
+            data_df.write.parquet(df_path, mode=mode)
+
+        DefaultParamsWriter.saveMetadata(
+            self.instance,
+            path,
+            self.sc,
+            extraMetadata={
+                "_cuml_params": self.instance._cuml_params,
+                "_num_workers": self.instance._num_workers,
+                "_float32_inputs": self.instance._float32_inputs,
+            },
+        )
+
+        # adhere to the overwrite() -> shouldOverWrite flag from the MLWriter
+        write_mode = "overwrite" if self.shouldOverwrite else "errorifexists"
+
+        # get a copy, since we're going to modify the array attributes
+        model_attributes = self.instance._get_model_attributes()
+        assert model_attributes is not None
+        model_attributes = model_attributes.copy()
+
+        data_path = os.path.join(path, "data")
+
+        for key in ["embedding_", "raw_data_"]:
+            array = model_attributes[key]
+            if isinstance(array, scipy.sparse.csr_matrix):
+                df_dir = os.path.join(data_path, f"{key}csr")
+                write_sparse_array(array, df_dir, write_mode)
+                model_attributes[key] = df_dir
+                model_attributes[key + "shape"] = array.shape
+            else:
+                df_path = os.path.join(data_path, f"{key}.parquet")
+                write_dense_array(array, df_path, write_mode)
+                model_attributes[key] = df_path
+
+        metadata_file_path = os.path.join(data_path, "metadata.json")
+        model_attributes_str = json.dumps(model_attributes)
+        self.sc.parallelize([model_attributes_str], 1).saveAsTextFile(
+            metadata_file_path
+        )
+
+
+class _CumlModelReaderParquet(_CumlModelReader):
+    """
+    Override parent reader to instantiate _CumlModel array attributes from Spark DataFrame parquet files
+    """
+
+    def load(self, path: str) -> "_CumlEstimator":
+
+        spark = _get_spark_session()
+
+        def read_sparse_array(
+            df_dir: str, csr_shape: Tuple[int, int]
+        ) -> scipy.sparse.csr_matrix:
+            indptr_df = spark.read.parquet(
+                os.path.join(df_dir, "indptr.parquet")
+            ).orderBy("indptr")
+            indices_data_df = spark.read.parquet(
+                os.path.join(df_dir, "indices_data.parquet")
+            ).orderBy("row_id")
+
+            indptr = np.squeeze(np.array(indptr_df.collect(), dtype=np.int32))
+            indices = np.squeeze(
+                np.array(indices_data_df.select("indices").collect(), dtype=np.int32)
+            )
+            data = np.squeeze(
+                np.array(indices_data_df.select("data").collect(), dtype=np.float32)
+            )
+
+            return scipy.sparse.csr_matrix((data, indices, indptr), shape=csr_shape)
+
+        def read_dense_array(df_path: str) -> np.ndarray:
+            data_df = spark.read.parquet(df_path).orderBy("row_id")
+            pdf = data_df.toPandas()
+            assert type(pdf) == pd.DataFrame
+            return np.array(list(pdf.data), dtype=np.float32)
+
+        metadata = DefaultParamsReader.loadMetadata(path, self.sc)
+        data_path = os.path.join(path, "data")
+        metadata_file_path = os.path.join(data_path, "metadata.json")
+
+        model_attr_str = self.sc.textFile(metadata_file_path).collect()[0]
+        model_attr_dict = json.loads(model_attr_str)
+
+        for key in ["embedding_", "raw_data_"]:
+            df_path = model_attr_dict[key]
+            if df_path.endswith("csr"):
+                csr_shape = model_attr_dict.pop(key + "shape")
+                model_attr_dict[key] = read_sparse_array(df_path, csr_shape)
+            else:
+                model_attr_dict[key] = read_dense_array(df_path)
+
+        instance = self.model_cls(**model_attr_dict)
+        DefaultParamsReader.getAndSetParams(instance, metadata)
+        instance._cuml_params = metadata["_cuml_params"]
+        instance._num_workers = metadata["_num_workers"]
+        instance._float32_inputs = metadata["_float32_inputs"]
+        return instance
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c

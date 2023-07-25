@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2022-2023, NVIDIA CORPORATION.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 import json
 import os
 import threading
-from abc import abstractmethod
+from abc import ABCMeta, abstractmethod
 from collections import namedtuple
 from typing import (
     TYPE_CHECKING,
@@ -37,16 +37,17 @@ from typing import (
 
 import numpy as np
 import pandas as pd
-from pyspark import RDD, TaskContext
+from pyspark import RDD, SparkConf, TaskContext
 from pyspark.ml import Estimator, Model
 from pyspark.ml.evaluation import Evaluator
 from pyspark.ml.functions import array_to_vector, vector_to_array
-from pyspark.ml.linalg import VectorUDT
+from pyspark.ml.linalg import DenseVector, SparseVector, VectorUDT
 from pyspark.ml.param.shared import (
     HasLabelCol,
     HasOutputCol,
     HasPredictionCol,
     HasProbabilityCol,
+    HasRawPredictionCol,
 )
 from pyspark.ml.util import (
     DefaultParamsReader,
@@ -56,6 +57,7 @@ from pyspark.ml.util import (
     MLWritable,
     MLWriter,
 )
+from pyspark.ml.wrapper import JavaParams
 from pyspark.sql import Column, DataFrame
 from pyspark.sql.functions import col, struct
 from pyspark.sql.pandas.functions import pandas_udf
@@ -67,20 +69,25 @@ from pyspark.sql.types import (
     Row,
     StructType,
 )
+from scipy.sparse import csr_matrix
 
 from .common.cuml_context import CumlContext
+from .metrics import EvalMetricInfo
 from .params import _CumlParams
 from .utils import (
     _ArrayOrder,
+    _configure_memory_resource,
     _get_gpu_id,
     _get_spark_session,
     _is_local,
+    _is_standalone_or_localcluster,
     dtype_to_pyspark_type,
     get_logger,
 )
 
 if TYPE_CHECKING:
     import cudf
+    import cupy as cp
     from pyspark.ml._typing import ParamMap
 
 CumlT = Any
@@ -100,24 +107,50 @@ TransformInputType = Union["cudf.DataFrame", np.ndarray]
 _ConstructFunc = Callable[..., Union[CumlT, List[CumlT]]]
 
 # Function to do the inference using cuml instance constructed by _ConstructFunc
-_TransformFunc = Callable[[CumlT, TransformInputType], pd.DataFrame]
+_TransformFunc = Union[
+    Callable[[CumlT, TransformInputType], pd.DataFrame],
+    Callable[[CumlT, TransformInputType], "cp.ndarray"],
+]
 
 # Function to do evaluation based on the prediction result got from _TransformFunc
 _EvaluateFunc = Callable[
     [
         TransformInputType,  # input dataset with label column
-        TransformInputType,  # inferred dataset with prediction column
+        "cp.ndarray",  # inferred dataset with prediction column
     ],
     pd.DataFrame,
 ]
 
 # Global constant for defining column alias
-Alias = namedtuple("Alias", ("data", "label", "row_number"))
-alias = Alias("cuml_values", "cuml_label", "unique_id")
+Alias = namedtuple(
+    "Alias",
+    (
+        "featureVectorType",
+        "featureVectorSize",
+        "featureVectorIndices",
+        "data",
+        "label",
+        "row_number",
+    ),
+)
+
+# Avoid same naming. `echo spark-rapids-ml | base64` = c3BhcmstcmFwaWRzLW1sCg==
+col_name_unique_tag = "c3BhcmstcmFwaWRzLW1sCg=="
+
+alias = Alias(
+    f"vector_type_{col_name_unique_tag}",
+    f"vector_size_{col_name_unique_tag}",
+    f"vector_indices_{col_name_unique_tag}",
+    f"cuml_values_{col_name_unique_tag}",
+    "cuml_label",
+    "unique_id",
+)
 
 # Global prediction names
-Pred = namedtuple("Pred", ("prediction", "probability", "model_index"))
-pred = Pred("prediction", "probability", "model_index")
+Pred = namedtuple(
+    "Pred", ("prediction", "probability", "model_index", "raw_prediction")
+)
+pred = Pred("prediction", "probability", "model_index", "raw_prediction")
 
 # Global parameter alias used by core and subclasses.
 ParamAlias = namedtuple(
@@ -130,9 +163,93 @@ param_alias = ParamAlias(
 
 CumlModel = TypeVar("CumlModel", bound="_CumlModel")
 
-# Global parameter used by core and subclasses.
-TransformEvaluate = namedtuple("TransformEvaluate", ("transform", "transform_evaluate"))
-transform_evaluate = TransformEvaluate("transform", "transform_evaluate")
+from .utils import _get_unwrap_udt_fn
+
+
+# similar to the XGBOOST _get_unwrapped_vec_cols in https://github.com/dmlc/xgboost/blob/master/python-package/xgboost/spark/core.py
+def _get_unwrapped_vec_cols(feature_col: Column, float32_inputs: bool) -> List[Column]:
+    unwrap_udt = _get_unwrap_udt_fn()
+    features_unwrapped_vec_col = unwrap_udt(feature_col)
+
+    # After a `pyspark.ml.linalg.VectorUDT` type column being unwrapped, it becomes
+    # a pyspark struct type column, the struct fields are:
+    #  - `type`: byte
+    #  - `size`: int
+    #  - `indices`: array<int>
+    #  - `values`: array<double>
+    # For sparse vector, `type` field is 0, `size` field means vector dimension,
+    # `indices` field is the array of active element indices, `values` field
+    # is the array of active element values.
+    # For dense vector, `type` field is 1, `size` and `indices` fields are None,
+    # `values` field is the array of the vector element values.
+
+    values_col = features_unwrapped_vec_col.values
+    if float32_inputs is True:
+        values_col = values_col.cast(ArrayType(FloatType()))
+
+    return [
+        features_unwrapped_vec_col.type.alias(alias.featureVectorType),
+        features_unwrapped_vec_col.size.alias(alias.featureVectorSize),
+        features_unwrapped_vec_col.indices.alias(alias.featureVectorIndices),
+        values_col.alias(alias.data),
+    ]
+
+
+def _use_sparse_in_cuml(dataset: DataFrame) -> bool:
+    return (
+        alias.featureVectorType in dataset.schema.fieldNames()
+        and alias.featureVectorSize in dataset.schema.fieldNames()
+        and alias.featureVectorIndices in dataset.schema.fieldNames()
+    )  # use sparse array in cuml only if features vectorudt column was unwrapped
+
+
+# similar to the XGBOOST _read_csr_matrix_from_unwrapped_spark_vec in https://github.com/dmlc/xgboost/blob/master/python-package/xgboost/spark/data.py
+def _read_csr_matrix_from_unwrapped_spark_vec(part: pd.DataFrame) -> csr_matrix:
+    # variables for constructing csr_matrix
+    csr_indices_list, csr_indptr_list, csr_values_list = [], [0], []
+
+    n_features = 0
+
+    # TBD: investigate if there is a more efficient 'vectorized' approach to doing this. Iterating in python can be slow
+    for vec_type, vec_size_, vec_indices, vec_values in zip(
+        part[alias.featureVectorType],
+        part[alias.featureVectorSize],
+        part[alias.featureVectorIndices],
+        part[alias.data],
+    ):
+        if vec_type == 0:
+            # sparse vector
+            vec_size = int(vec_size_)
+            csr_indices = vec_indices
+            csr_values = vec_values
+        else:
+            # dense vector
+            # Note: According to spark ML VectorUDT format,
+            # when type field is 1, the size field is also empty.
+            # we need to check the values field to get vector length.
+            vec_size = len(vec_values)
+            csr_indices = np.arange(vec_size, dtype=np.int32)
+            csr_values = vec_values
+
+        if n_features == 0:
+            n_features = vec_size
+        assert n_features == vec_size, "all vectors must be of the same dimension"
+
+        csr_indices_list.append(csr_indices)
+        csr_indptr_list.append(csr_indptr_list[-1] + len(csr_indices))
+        assert len(csr_indptr_list) == 1 + len(csr_indices_list)
+
+        csr_values_list.append(csr_values)
+
+    assert len(csr_indptr_list) == 1 + len(part)
+
+    csr_indptr_arr = np.array(csr_indptr_list)
+    csr_indices_arr = np.concatenate(csr_indices_list)
+    csr_values_arr = np.concatenate(csr_values_list)
+
+    return csr_matrix(
+        (csr_values_arr, csr_indices_arr, csr_indptr_arr), shape=(len(part), n_features)
+    )
 
 
 class _CumlEstimatorWriter(MLWriter):
@@ -152,6 +269,7 @@ class _CumlEstimatorWriter(MLWriter):
             extraMetadata={
                 "_cuml_params": self.instance._cuml_params,
                 "_num_workers": self.instance._num_workers,
+                "_float32_inputs": self.instance._float32_inputs,
             },
         )  # type: ignore
 
@@ -172,6 +290,7 @@ class _CumlEstimatorReader(MLReader):
         DefaultParamsReader.getAndSetParams(cuml_estimator, metadata)
         cuml_estimator._cuml_params = metadata["_cuml_params"]
         cuml_estimator._num_workers = metadata["_num_workers"]
+        cuml_estimator._float32_inputs = metadata["_float32_inputs"]
         return cuml_estimator
 
 
@@ -192,10 +311,11 @@ class _CumlModelWriter(MLWriter):
             extraMetadata={
                 "_cuml_params": self.instance._cuml_params,
                 "_num_workers": self.instance._num_workers,
+                "_float32_inputs": self.instance._float32_inputs,
             },
         )
         data_path = os.path.join(path, "data")
-        model_attributes = self.instance.get_model_attributes()
+        model_attributes = self.instance._get_model_attributes()
         model_attributes_str = json.dumps(model_attributes)
         self.sc.parallelize([model_attributes_str], 1).saveAsTextFile(data_path)
 
@@ -218,20 +338,20 @@ class _CumlModelReader(MLReader):
         DefaultParamsReader.getAndSetParams(instance, metadata)
         instance._cuml_params = metadata["_cuml_params"]
         instance._num_workers = metadata["_num_workers"]
+        instance._float32_inputs = metadata["_float32_inputs"]
         return instance
 
 
 class _CumlCommon(MLWritable, MLReadable):
     def __init__(self) -> None:
         super().__init__()
-        self.logger = get_logger(self.__class__)
 
     @staticmethod
-    def set_gpu_device(
+    def _get_gpu_device(
         context: Optional[TaskContext], is_local: bool, is_transform: bool = False
-    ) -> None:
+    ) -> int:
         """
-        Set gpu device according to the spark task resources.
+        Get gpu device according to the spark task resources.
 
         If it is local mode, we use partition id as gpu id for training
         and (partition id ) % gpus for transform.
@@ -252,10 +372,29 @@ class _CumlCommon(MLWritable, MLReadable):
         else:
             gpu_id = _get_gpu_id(context)
 
+        return gpu_id
+
+    @staticmethod
+    def _set_gpu_device(
+        context: Optional[TaskContext], is_local: bool, is_transform: bool = False
+    ) -> None:
+        """
+        Set gpu device according to the spark task resources.
+
+        If it is local mode, we use partition id as gpu id for training
+        and (partition id ) % gpus for transform.
+        """
+        # Get the GPU ID from resources
+        assert context is not None
+
+        import cupy
+
+        gpu_id = _CumlCommon._get_gpu_device(context, is_local, is_transform)
+
         cupy.cuda.Device(gpu_id).use()
 
     @staticmethod
-    def initialize_cuml_logging(verbose: Optional[Union[bool, int]]) -> None:
+    def _initialize_cuml_logging(verbose: Optional[Union[bool, int]]) -> None:
         """Initializes the logger for cuML.
 
         Parameters
@@ -279,6 +418,16 @@ class _CumlCommon(MLWritable, MLReadable):
 
             cuml_logger.set_level(log_level)
 
+    def _pyspark_class(self) -> Optional[ABCMeta]:
+        """
+        Subclass should override to return corresponding pyspark.ml class
+        Ex. logistic regression should return pyspark.ml.classification.LogisticRegression
+        Return None if no corresponding class in pyspark, e.g. knn
+        """
+        raise NotImplementedError(
+            "pyspark.ml class corresponding to estimator not specified."
+        )
+
 
 class _CumlCaller(_CumlParams, _CumlCommon):
     """
@@ -292,7 +441,7 @@ class _CumlCaller(_CumlParams, _CumlCommon):
 
     def __init__(self) -> None:
         super().__init__()
-        self.initialize_cuml_params()
+        self._initialize_cuml_params()
 
     @abstractmethod
     def _out_schema(self) -> Union[StructType, str]:
@@ -308,10 +457,11 @@ class _CumlCaller(_CumlParams, _CumlCommon):
         """
         return dataset.repartition(self.num_workers)
 
-    def _pre_process_data(
-        self, dataset: DataFrame
-    ) -> Tuple[
-        List[Column], Optional[List[str]], int, Union[Type[FloatType], Type[DoubleType]]
+    def _pre_process_data(self, dataset: DataFrame) -> Tuple[
+        List[Column],
+        Optional[List[str]],
+        int,
+        Union[Type[FloatType], Type[DoubleType]],
     ]:
         select_cols = []
 
@@ -323,40 +473,85 @@ class _CumlCaller(_CumlParams, _CumlCommon):
         if input_col is not None:
             # Single Column
             input_datatype = dataset.schema[input_col].dataType
+            first_record = dataset.first()
 
             if isinstance(input_datatype, ArrayType):
                 # Array type
-                select_cols.append(col(input_col).alias(alias.data))
-                if isinstance(input_datatype.elementType, DoubleType):
+                if (
+                    isinstance(input_datatype.elementType, DoubleType)
+                    and not self._float32_inputs
+                ):
+                    select_cols.append(col(input_col).alias(alias.data))
                     feature_type = DoubleType
+                elif (
+                    isinstance(input_datatype.elementType, DoubleType)
+                    and self._float32_inputs
+                ):
+                    select_cols.append(
+                        col(input_col).cast(ArrayType(feature_type())).alias(alias.data)
+                    )
+                else:
+                    # FloatType array
+                    select_cols.append(col(input_col).alias(alias.data))
             elif isinstance(input_datatype, VectorUDT):
-                # Vector type
-                select_cols.append(
-                    vector_to_array(col(input_col)).alias(alias.data)  # type: ignore
+                vector_element_type = "float32" if self._float32_inputs else "float64"
+                first_vectorudt_type = (
+                    DenseVector
+                    if first_record is None
+                    or type(first_record[input_col]) is DenseVector
+                    else SparseVector
                 )
-                feature_type = DoubleType
+                use_sparse = self.hasParam(
+                    "enable_sparse_data_optim"
+                ) and self.getOrDefault("enable_sparse_data_optim")
+
+                if use_sparse is True or (
+                    use_sparse is None and first_vectorudt_type is SparseVector
+                ):
+                    # Sparse Vector type
+                    select_cols += _get_unwrapped_vec_cols(
+                        col(input_col), self._float32_inputs
+                    )
+                else:
+                    # Dense Vector type
+                    assert use_sparse is False or (
+                        use_sparse is None and first_vectorudt_type is DenseVector
+                    )
+                    select_cols.append(
+                        vector_to_array(col(input_col), vector_element_type).alias(alias.data)  # type: ignore
+                    )
+
+                if not self._float32_inputs:
+                    feature_type = DoubleType
             else:
                 raise ValueError("Unsupported input type.")
 
-            dimension = len(dataset.first()[input_col])  # type: ignore
+            dimension = len(first_record[input_col])  # type: ignore
 
         elif input_cols is not None:
+            # if self._float32_inputs is False and if any columns are double type, convert all to double type
+            # otherwise convert all to float type
+            any_double_types = any(
+                [isinstance(dataset.schema[c].dataType, DoubleType) for c in input_cols]
+            )
+            if not self._float32_inputs and any_double_types:
+                feature_type = DoubleType
             dimension = len(input_cols)
             for c in input_cols:
                 col_type = dataset.schema[c].dataType
-                if isinstance(col_type, IntegralType):
-                    # Convert integral type to float.
-                    select_cols.append(col(c).cast(feature_type()).alias(c))
-                elif isinstance(col_type, FloatType):
-                    select_cols.append(col(c))
-                elif isinstance(col_type, DoubleType):
-                    select_cols.append(col(c))
-                    feature_type = DoubleType
+                if (
+                    isinstance(col_type, IntegralType)
+                    or isinstance(col_type, FloatType)
+                    or isinstance(col_type, DoubleType)
+                ):
+                    if not isinstance(col_type, feature_type):
+                        select_cols.append(col(c).cast(feature_type()).alias(c))
+                    else:
+                        select_cols.append(col(c))
                 else:
                     raise ValueError(
                         "All columns must be integral types or float/double types."
                     )
-
         else:
             # should never get here
             raise Exception("Unable to determine input column(s).")
@@ -372,18 +567,48 @@ class _CumlCaller(_CumlParams, _CumlCommon):
         """
         return (True, False)
 
+<<<<<<< HEAD
     def _use_fit_generator(self) -> bool:
         """
         If the fit func is implemented as a generator function to return data row-by-row in the output RDD.
         """
         return False
+=======
+    def _validate_parameters(self) -> None:
+        cls_name = self._pyspark_class()
+
+        if cls_name is not None:
+            pyspark_est = cls_name()
+            # Both pyspark and cuml may have a parameter with the same name,
+            # but cuml might have additional optional values that can be set.
+            # If we transfer these cuml-specific values to the Spark JVM,
+            # it would result in an exception.
+            # To avoid this issue, we skip transferring these parameters
+            # since the mapped parameters have been validated in _get_cuml_mapping_value.
+            cuml_est = self.copy()
+            cuml_params = cuml_est._param_value_mapping().keys()
+            param_mapping = cuml_est._param_mapping()
+            pyspark_params = [k for k, v in param_mapping.items() if v in cuml_params]
+            for p in pyspark_params:
+                cuml_est.clear(cuml_est.getParam(p))
+
+            cuml_est._copyValues(pyspark_est)
+            # validate the parameters
+            pyspark_est._transfer_params_to_java()
+
+            del pyspark_est
+            del cuml_est
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
     @abstractmethod
     def _get_cuml_fit_func(
         self,
         dataset: DataFrame,
         extra_params: Optional[List[Dict[str, Any]]] = None,
-    ) -> Callable[[FitInputType, Dict[str, Any]], Dict[str, Any],]:
+    ) -> Callable[
+        [FitInputType, Dict[str, Any]],
+        Dict[str, Any],
+    ]:
         """
         Subclass must implement this function to return a cuml fit function that will be
         sent to executor to run.
@@ -442,6 +667,7 @@ class _CumlCaller(_CumlParams, _CumlCommon):
         :class:`Transformer`
             fitted model
         """
+        self._validate_parameters()
 
         cls = self.__class__
 
@@ -482,6 +708,7 @@ class _CumlCaller(_CumlParams, _CumlCommon):
                 fit_multiple_params.append(tmp_fit_multiple_params)
         params[param_alias.fit_multiple_params] = fit_multiple_params
 
+<<<<<<< HEAD
         use_generator = self._use_fit_generator()
 
         if not use_generator:
@@ -490,69 +717,102 @@ class _CumlCaller(_CumlParams, _CumlCommon):
             )
         else:
             cuml_fit_func = self._get_cuml_fit_generator_func(dataset, None)  # type: ignore
+=======
+        cuml_fit_func = self._get_cuml_fit_func(
+            dataset, None if len(fit_multiple_params) == 0 else fit_multiple_params
+        )
+>>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
         array_order = self._fit_array_order()
 
         cuml_verbose = self.cuml_params.get("verbose", False)
 
+        use_sparse_array = _use_sparse_in_cuml(dataset)
+
         (enable_nccl, require_ucx) = self._require_nccl_ucx()
 
         def _train_udf(pdf_iter: Iterator[pd.DataFrame]) -> pd.DataFrame:
-            from pyspark import BarrierTaskContext
-
-            logger = get_logger(cls)
-            logger.info("Initializing cuml context")
-
             import cupy as cp
-
-            if cuda_managed_mem_enabled:
-                import rmm
-                from rmm.allocators.cupy import rmm_cupy_allocator
-
-                rmm.reinitialize(managed_memory=True)
-                cp.cuda.set_allocator(rmm_cupy_allocator)
-
-            _CumlCommon.initialize_cuml_logging(cuml_verbose)
+            import cupyx
+            from pyspark import BarrierTaskContext
 
             context = BarrierTaskContext.get()
             partition_id = context.partitionId()
+            logger = get_logger(cls)
 
             # set gpu device
-            _CumlCommon.set_gpu_device(context, is_local)
+            _CumlCommon._set_gpu_device(context, is_local)
 
+            # must do after setting gpu device
+            _configure_memory_resource(cuda_managed_mem_enabled)
+
+            _CumlCommon._initialize_cuml_logging(cuml_verbose)
+
+            # handle the input
+            # inputs = [(X, Optional(y)), (X, Optional(y))]
+            logger.info("Loading data into python worker memory")
+            inputs = []
+            sizes = []
+
+            for pdf in pdf_iter:
+                sizes.append(pdf.shape[0])
+                if multi_col_names:
+                    features = np.array(pdf[multi_col_names], order=array_order)
+                elif use_sparse_array:
+                    # sparse vector
+                    features = _read_csr_matrix_from_unwrapped_spark_vec(pdf)
+                else:
+                    # dense vector
+                    features = np.array(list(pdf[alias.data]), order=array_order)
+
+                # experiments indicate it is faster to convert to numpy array and then to cupy array than directly
+                # invoking cupy array on the list
+                if cuda_managed_mem_enabled and use_sparse_array is False:
+                    features = cp.array(features)
+
+                label = pdf[alias.label] if alias.label in pdf.columns else None
+                row_number = (
+                    pdf[alias.row_number] if alias.row_number in pdf.columns else None
+                )
+                inputs.append((features, label, row_number))
+
+            if cuda_managed_mem_enabled and use_sparse_array is True:
+                concated_nnz = sum(triplet[0].nnz for triplet in inputs)  # type: ignore
+                if concated_nnz > np.iinfo(np.int32).max:
+                    logger.warn(
+                        f"The number of non-zero values of a partition exceeds the int32 index dtype. \
+                        cupyx csr_matrix currently does not support int64 indices (https://github.com/cupy/cupy/issues/3513); \
+                        keeping as scipy csr_matrix to avoid overflow."
+                    )
+                else:
+                    inputs = [
+                        (cupyx.scipy.sparse.csr_matrix(row[0]), row[1], row[2])
+                        for row in inputs
+                    ]
+
+            if len(sizes) == 0 or all(sz == 0 for sz in sizes):
+                raise RuntimeError(
+                    "A python worker received no data.  Please increase amount of data or use fewer workers."
+                )
+
+            logger.info("Initializing cuml context")
             with CumlContext(
                 partition_id, num_workers, context, enable_nccl, require_ucx
             ) as cc:
-                # handle the input
-                # inputs = [(X, Optional(y)), (X, Optional(y))]
-                logger.info("Loading data into python worker memory")
-                inputs = []
-                sizes = []
-                for pdf in pdf_iter:
-                    sizes.append(pdf.shape[0])
-                    if multi_col_names:
-                        features = np.array(pdf[multi_col_names], order=array_order)
-                    else:
-                        features = np.array(list(pdf[alias.data]), order=array_order)
-                    # experiments indicate it is faster to convert to numpy array and then to cupy array than directly
-                    # invoking cupy array on the list
-                    if cuda_managed_mem_enabled:
-                        features = cp.array(features)
-
-                    label = pdf[alias.label] if alias.label in pdf.columns else None
-                    row_number = (
-                        pdf[alias.row_number]
-                        if alias.row_number in pdf.columns
-                        else None
-                    )
-                    inputs.append((features, label, row_number))
-
                 params[param_alias.handle] = cc.handle
                 params[param_alias.part_sizes] = sizes
                 params[param_alias.num_cols] = dimension
                 params[param_alias.loop] = cc._loop
 
                 logger.info("Invoking cuml fit")
+
+                # pyspark uses sighup to kill python workers gracefully, and for some reason
+                # the signal handler for sighup needs to be explicitly reset at this point
+                # to avoid having SIGHUP be swallowed during a usleep call in the nccl library.
+                # this helps avoid zombie surviving python workers when some workers fail.
+                import signal
+
+                signal.signal(signal.SIGHUP, signal.SIG_DFL)
 
                 # call the cuml fit function
                 # *note*: cuml_fit_func may delete components of inputs to free
@@ -649,6 +909,7 @@ class _CumlEstimator(Estimator, _CumlCaller):
 
     def __init__(self) -> None:
         super().__init__()
+        self.logger = get_logger(self.__class__)
 
     @abstractmethod
     def _create_pyspark_model(self, result: Row) -> "_CumlModel":
@@ -693,6 +954,111 @@ class _CumlEstimator(Estimator, _CumlCaller):
         else:
             return super().fitMultiple(dataset, paramMaps)
 
+    def _skip_stage_level_scheduling(self, spark_version: str, conf: SparkConf) -> bool:
+        """Check if stage-level scheduling is not needed,
+        return true to skip stage-level scheduling"""
+
+        if spark_version < "3.4.0":
+            self.logger.info(
+                "Stage-level scheduling in spark-rapids-ml requires spark version 3.4.0+"
+            )
+            return True
+
+        if "3.4.0" <= spark_version < "3.5.1" and not _is_standalone_or_localcluster(
+            conf
+        ):
+            self.logger.info(
+                "For Spark %s, Stage-level scheduling in spark-rapids-ml requires spark "
+                "standalone or local-cluster mode",
+                spark_version,
+            )
+            return True
+
+        executor_cores = conf.get("spark.executor.cores")
+        executor_gpus = conf.get("spark.executor.resource.gpu.amount")
+        if executor_cores is None or executor_gpus is None:
+            self.logger.info(
+                "Stage-level scheduling in spark-rapids-ml requires spark.executor.cores, "
+                "spark.executor.resource.gpu.amount to be set."
+            )
+            return True
+
+        if int(executor_cores) == 1:
+            # there will be only 1 task running at any time.
+            self.logger.info(
+                "Stage-level scheduling in spark-rapids-ml requires spark.executor.cores > 1 "
+            )
+            return True
+
+        if int(executor_gpus) > 1:
+            # For spark.executor.resource.gpu.amount > 1, we suppose user knows how to configure
+            # to make spark-rapids-ml run successfully.
+            self.logger.info(
+                "Stage-level scheduling in spark-rapids-ml will not work "
+                "when spark.executor.resource.gpu.amount>1"
+            )
+            return True
+
+        task_gpu_amount = conf.get("spark.task.resource.gpu.amount")
+
+        if task_gpu_amount is None:
+            # The ETL tasks will not grab a gpu when spark.task.resource.gpu.amount is not set,
+            # but with stage-level scheduling, we can make training task grab the gpu.
+            return False
+
+        if float(task_gpu_amount) == float(executor_gpus):
+            # spark.executor.resource.gpu.amount=spark.task.resource.gpu.amount "
+            # results in only 1 task running at a time, which may cause perf issue.
+            return True
+
+        # We can enable stage-level scheduling
+        return False
+
+    def _try_stage_level_scheduling(self, rdd: RDD) -> RDD:
+        ss = _get_spark_session()
+        sc = ss.sparkContext
+
+        if _is_local(sc) or self._skip_stage_level_scheduling(ss.version, sc.getConf()):
+            return rdd
+
+        # executor_cores will not be None
+        executor_cores = ss.sparkContext.getConf().get("spark.executor.cores")
+        assert executor_cores is not None
+
+        from pyspark.resource.profile import ResourceProfileBuilder
+        from pyspark.resource.requests import TaskResourceRequests
+
+        # each training task requires cpu cores > total executor cores/2 which can
+        # ensure each training task be sent to different executor.
+        #
+        # Please note that we can't set task_cores to the value which is smaller than total executor cores/2
+        # because only task_gpus can't ensure the tasks be sent to different executor even task_gpus=1.0
+        #
+        # If spark-rapids enabled. we don't allow other ETL task running alongside training task to avoid OOM
+        spark_plugins = ss.conf.get("spark.plugins", " ")
+        assert spark_plugins is not None
+        spark_rapids_sql_enabled = ss.conf.get("spark.rapids.sql.enabled", "true")
+        assert spark_rapids_sql_enabled is not None
+
+        task_cores = (
+            int(executor_cores)
+            if "com.nvidia.spark.SQLPlugin" in spark_plugins
+            and "true" == spark_rapids_sql_enabled.lower()
+            else (int(executor_cores) // 2) + 1
+        )
+        # task_gpus means how many slots per gpu address the task requires,
+        # it does mean how many gpus it would like to require, so it can be any value of (0, 0.5] or 1.
+        task_gpus = 1.0
+
+        treqs = TaskResourceRequests().cpus(task_cores).resource("gpu", task_gpus)
+        rp = ResourceProfileBuilder().require(treqs).build
+
+        self.logger.info(
+            f"Training tasks require the resource(cores={task_cores}, gpu={task_gpus})"
+        )
+
+        return rdd.withResources(rp)
+
     def _fit_internal(
         self, dataset: DataFrame, paramMaps: Optional[Sequence["ParamMap"]]
     ) -> List["_CumlModel"]:
@@ -702,7 +1068,14 @@ class _CumlEstimator(Estimator, _CumlCaller):
             partially_collect=True,
             paramMaps=paramMaps,
         )
+
+        pipelined_rdd = self._try_stage_level_scheduling(pipelined_rdd)
+
+        self.logger.info(
+            f"Training spark-rapids-ml with {self.num_workers} worker(s) ..."
+        )
         rows = pipelined_rdd.collect()
+        self.logger.info("Finished training")
 
         models: List["_CumlModel"] = [None]  # type: ignore
         if paramMaps is not None:
@@ -711,6 +1084,7 @@ class _CumlEstimator(Estimator, _CumlCaller):
         for index in range(len(models)):
             model = self._create_pyspark_model(rows[index])
             model._num_workers = self._num_workers
+            model._float32_inputs = self._float32_inputs
 
             if paramMaps is not None:
                 self._copyValues(model, paramMaps[index])
@@ -800,7 +1174,7 @@ class _CumlModel(Model, _CumlParams, _CumlCommon):
         Subclass must pass the model attributes which will be saved in model persistence.
         """
         super().__init__()
-        self.initialize_cuml_params()
+        self._initialize_cuml_params()
 
         # model_data is the native data which will be saved for model persistence
         self._model_attributes = model_attributes
@@ -813,12 +1187,12 @@ class _CumlModel(Model, _CumlParams, _CumlCommon):
         """Return the equivalent PySpark CPU model"""
         raise NotImplementedError()
 
-    def get_model_attributes(self) -> Optional[Dict[str, Any]]:
+    def _get_model_attributes(self) -> Optional[Dict[str, Any]]:
         """Return model attributes as a dictionary."""
         return self._model_attributes
 
     @classmethod
-    def from_row(cls, model_attributes: Row):  # type: ignore
+    def _from_row(cls, model_attributes: Row):  # type: ignore
         """
         Default to pass all the attributes of the model to the model constructor,
         So please make sure if the constructor can accept all of them.
@@ -828,8 +1202,10 @@ class _CumlModel(Model, _CumlParams, _CumlCommon):
 
     @abstractmethod
     def _get_cuml_transform_func(
-        self, dataset: DataFrame, category: str = transform_evaluate.transform
-    ) -> Tuple[_ConstructFunc, _TransformFunc, Optional[_EvaluateFunc],]:
+        self,
+        dataset: DataFrame,
+        eval_metric_info: Optional[EvalMetricInfo] = None,
+    ) -> Tuple[_ConstructFunc, _TransformFunc, Optional[_EvaluateFunc]]:
         """
         Subclass must implement this function to return three functions,
         1. a function to construct cuml counterpart instance
@@ -848,7 +1224,7 @@ class _CumlModel(Model, _CumlParams, _CumlCommon):
                 ...
             ...
 
-            # please note that if category is transform, the evaluate function will be ignored.
+            # please note that if eval_metric_info is None, the evaluate function will be None.
             return _construct_cuml_object, _cuml_transform, _evaluate
 
         _get_cuml_transform_func itself runs on the driver side, while the returned
@@ -872,47 +1248,140 @@ class _CumlModel(Model, _CumlParams, _CumlCommon):
 
     def _pre_process_data(
         self, dataset: DataFrame
-    ) -> Tuple[DataFrame, List[str], bool]:
+    ) -> Tuple[DataFrame, List[str], bool, List[str]]:
         """Pre-handle the dataset before transform.
 
         Please note that, this function just transforms the input column if necessary, and
         it will keep the unused columns.
 
-        return (dataset, list of feature names, bool value to indicate if it is multi-columns input)
+        return (dataset, list of feature names, bool value to indicate if it is multi-columns input, list of temporary columns to be dropped)
         """
         select_cols = []
+        tmp_cols = []
         input_is_multi_cols = True
 
         input_col, input_cols = self._get_input_columns()
 
         if input_col is not None:
-            if isinstance(dataset.schema[input_col].dataType, VectorUDT):
+            input_col_type = dataset.schema[input_col].dataType
+            if isinstance(input_col_type, VectorUDT):
                 # Vector type
-                # Avoid same naming. `echo spark-rapids-ml | base64` = c3BhcmstcmFwaWRzLW1sCg==
-                tmp_name = f"{alias.data}_c3BhcmstcmFwaWRzLW1sCg=="
-                dataset = (
-                    dataset.withColumnRenamed(input_col, tmp_name)
-                    .withColumn(input_col, vector_to_array(col(tmp_name)))
-                    .drop(tmp_name)
-                )
-            elif not isinstance(dataset.schema[input_col].dataType, ArrayType):
-                # Array type
+                vector_element_type = "float32" if self._float32_inputs else "float64"
+
+                if self.hasParam("enable_sparse_data_optim") is False:
+                    use_cuml_sparse = False
+                elif self.getOrDefault("enable_sparse_data_optim") is None:
+                    first_record = dataset.first()
+                    first_vectorudt_type = (
+                        DenseVector
+                        if first_record is None
+                        or type(first_record[input_col]) is DenseVector
+                        else SparseVector
+                    )
+                    use_cuml_sparse = first_vectorudt_type is SparseVector
+                else:
+                    use_cuml_sparse = self.getOrDefault("enable_sparse_data_optim")
+
+                if use_cuml_sparse:
+                    type_col, size_col, indices_col, data_col = _get_unwrapped_vec_cols(
+                        col(input_col), self._float32_inputs
+                    )
+
+                    dataset = dataset.withColumn(alias.featureVectorType, type_col)
+
+                    dataset = dataset.withColumn(alias.featureVectorSize, size_col)
+
+                    dataset = dataset.withColumn(
+                        alias.featureVectorIndices, indices_col
+                    )
+
+                    dataset = dataset.withColumn(alias.data, data_col.alias(alias.data))
+
+                    for col_name in [
+                        alias.featureVectorType,
+                        alias.featureVectorSize,
+                        alias.featureVectorIndices,
+                        alias.data,
+                    ]:
+                        select_cols.append(col_name)
+                        tmp_cols.append(col_name)
+                else:
+                    dataset = dataset.withColumn(
+                        alias.data,
+                        vector_to_array(col(input_col), vector_element_type),
+                    )
+                    select_cols.append(alias.data)
+                    tmp_cols.append(alias.data)
+            elif isinstance(input_col_type, ArrayType):
+                if (
+                    isinstance(input_col_type.elementType, DoubleType)
+                    and not self._float32_inputs
+                ):
+                    select_cols.append(input_col)
+                elif (
+                    isinstance(input_col_type.elementType, DoubleType)
+                    and self._float32_inputs
+                ):
+                    dataset = dataset.withColumn(
+                        alias.data, col(input_col).cast(ArrayType(FloatType()))
+                    )
+                    select_cols.append(alias.data)
+                    tmp_cols.append(alias.data)
+                else:
+                    # FloatType array
+                    select_cols.append(input_col)
+            elif not isinstance(input_col_type, ArrayType):
+                # not Array type
                 raise ValueError("Unsupported input type.")
-            select_cols.append(input_col)
             input_is_multi_cols = False
         elif input_cols is not None:
-            select_cols.extend(input_cols)
+            any_double_types = any(
+                [isinstance(dataset.schema[c].dataType, DoubleType) for c in input_cols]
+            )
+            feature_type: Union[Type[FloatType], Type[DoubleType]] = FloatType
+            if not self._float32_inputs and any_double_types:
+                feature_type = DoubleType
+
+            for c in input_cols:
+                col_type = dataset.schema[c].dataType
+                if (
+                    isinstance(col_type, IntegralType)
+                    or isinstance(col_type, FloatType)
+                    or isinstance(col_type, DoubleType)
+                ):
+                    if not isinstance(col_type, feature_type):
+                        tmp_input_col = f"{c}_{col_name_unique_tag}"
+                        select_cols.append(tmp_input_col)
+                        tmp_cols.append(tmp_input_col)
+                    else:
+                        select_cols.append(c)
+                else:
+                    raise ValueError(
+                        "All columns must be integral types or float/double types."
+                    )
+
+            taglen = len(col_name_unique_tag) + 1
+            added_tmp_cols = [
+                col(c[:-taglen]).cast(feature_type()).alias(c) for c in tmp_cols
+            ]
+            dataset = dataset.select("*", *added_tmp_cols)
         else:
             # should never get here
             raise Exception("Unable to determine input column(s).")
 
-        return dataset, select_cols, input_is_multi_cols
+        return dataset, select_cols, input_is_multi_cols, tmp_cols
+
+    def _concate_pdf_batches(self) -> bool:
+        return False
 
     def _transform_evaluate_internal(
-        self, dataset: DataFrame, schema: Union[StructType, str]
+        self,
+        dataset: DataFrame,
+        schema: Union[StructType, str],
+        eval_metric_info: Optional[EvalMetricInfo] = None,
     ) -> DataFrame:
         """Internal API to support transform and evaluation in a single pass"""
-        dataset, select_cols, input_is_multi_cols = self._pre_process_data(dataset)
+        dataset, select_cols, input_is_multi_cols, _ = self._pre_process_data(dataset)
 
         is_local = _is_local(_get_spark_session().sparkContext)
 
@@ -921,18 +1390,33 @@ class _CumlModel(Model, _CumlParams, _CumlCommon):
             construct_cuml_object_func,
             cuml_transform_func,
             evaluate_func,
-        ) = self._get_cuml_transform_func(
-            dataset, transform_evaluate.transform_evaluate
-        )
+        ) = self._get_cuml_transform_func(dataset, eval_metric_info)
+        if evaluate_func:
+            dataset = dataset.select(alias.label, *select_cols)
+        else:
+            dataset = dataset.select(*select_cols)
 
         array_order = self._transform_array_order()
+
+        use_sparse_array = _use_sparse_in_cuml(dataset)
+        concate_pdf_batches = self._concate_pdf_batches()
+
+        cuda_managed_mem_enabled = (
+            _get_spark_session().conf.get("spark.rapids.ml.uvm.enabled", "false")
+            == "true"
+        )
+        if cuda_managed_mem_enabled:
+            get_logger(self.__class__).info("CUDA managed memory enabled.")
 
         def _transform_udf(pdf_iter: Iterator[pd.DataFrame]) -> pd.DataFrame:
             from pyspark import TaskContext
 
             context = TaskContext.get()
 
-            _CumlCommon.set_gpu_device(context, is_local, True)
+            _CumlCommon._set_gpu_device(context, is_local, True)
+
+            # must do after setting gpu device
+            _configure_memory_resource(cuda_managed_mem_enabled)
 
             # Construct the cuml counterpart object
             cuml_instance = construct_cuml_object_func()
@@ -940,19 +1424,44 @@ class _CumlModel(Model, _CumlParams, _CumlCommon):
                 cuml_instance if isinstance(cuml_instance, list) else [cuml_instance]
             )
 
-            # TODO try to concatenate all the data and do the transform.
-            for pdf in pdf_iter:
+            def process_pdf_iter(
+                pdf_iter: Iterator[pd.DataFrame],
+            ) -> Iterator[pd.DataFrame]:
+                if concate_pdf_batches is False:
+                    for pdf in pdf_iter:
+                        yield pdf
+                else:
+                    pdfs = [pdf for pdf in pdf_iter]
+                    if (len(pdfs)) > 0:
+                        yield pd.concat(pdfs, ignore_index=True)
+
+            processed_pdf_iter = process_pdf_iter(pdf_iter)
+            has_row_number = None
+            for pdf in processed_pdf_iter:
+                if has_row_number is None:
+                    has_row_number = True if alias.row_number in pdf.columns else False
+                else:
+                    assert has_row_number == (alias.row_number in pdf.columns)
+
                 for index, cuml_object in enumerate(cuml_objects):
-                    # Transform the dataset
-                    if input_is_multi_cols:
+                    if has_row_number:
+                        data = cuml_transform_func(cuml_object, pdf)
+                    elif use_sparse_array:
+                        features = _read_csr_matrix_from_unwrapped_spark_vec(
+                            pdf[select_cols]
+                        )
+                        data = cuml_transform_func(cuml_object, features)
+                    elif input_is_multi_cols:
                         data = cuml_transform_func(cuml_object, pdf[select_cols])
                     else:
                         nparray = np.array(list(pdf[select_cols[0]]), order=array_order)
                         data = cuml_transform_func(cuml_object, nparray)
+
                     # Evaluate the dataset if necessary.
                     if evaluate_func is not None:
                         data = evaluate_func(pdf, data)
                         data[pred.model_index] = index
+
                     yield data
 
         return dataset.mapInPandas(_transform_udf, schema=schema)  # type: ignore
@@ -1030,6 +1539,20 @@ class _CumlModelWithColumns(_CumlModel):
 
         return True if isinstance(self, HasProbabilityCol) else False
 
+    def _has_raw_pred_col(self) -> bool:
+        """This API is needed and can be overwritten by subclass which
+        hasn't implemented predict raw yet"""
+
+        return True if isinstance(self, HasRawPredictionCol) else False
+
+    def _use_prob_as_raw_pred_col(self) -> bool:
+        """This API is needed and can be overwritten by subclass which
+        doesn't support raw predictions in cuml to use copy of probability
+        column instead.
+        """
+
+        return False
+
     def _get_prediction_name(self) -> str:
         """Different algos have different prediction names,
         eg, PCA: value of outputCol param, RF/LR/Kmeans: value of predictionCol name"""
@@ -1042,7 +1565,9 @@ class _CumlModelWithColumns(_CumlModel):
 
     def _transform(self, dataset: DataFrame) -> DataFrame:
         """This version of transform is directly adding extra columns to the dataset"""
-        dataset, select_cols, input_is_multi_cols = self._pre_process_data(dataset)
+        dataset, select_cols, input_is_multi_cols, tmp_cols = self._pre_process_data(
+            dataset
+        )
 
         is_local = _is_local(_get_spark_session().sparkContext)
 
@@ -1055,18 +1580,33 @@ class _CumlModelWithColumns(_CumlModel):
 
         array_order = self._transform_array_order()
 
-        @pandas_udf(self._out_schema(dataset.schema))  # type: ignore
+        use_sparse_array = _use_sparse_in_cuml(dataset)
+
+        output_schema = self._out_schema(dataset.schema)
+
+        cuda_managed_mem_enabled = (
+            _get_spark_session().conf.get("spark.rapids.ml.uvm.enabled", "false")
+            == "true"
+        )
+        if cuda_managed_mem_enabled:
+            get_logger(self.__class__).info("CUDA managed memory enabled.")
+
+        @pandas_udf(output_schema)  # type: ignore
         def predict_udf(iterator: Iterator[pd.DataFrame]) -> Iterator[pd.Series]:
             from pyspark import TaskContext
 
             context = TaskContext.get()
-            _CumlCommon.set_gpu_device(context, is_local, True)
+            _CumlCommon._set_gpu_device(context, is_local, True)
+            # must do after setting gpu device
+            _configure_memory_resource(cuda_managed_mem_enabled)
             cuml_objects = construct_cuml_object_func()
             cuml_object = (
                 cuml_objects[0] if isinstance(cuml_objects, list) else cuml_objects
             )
             for pdf in iterator:
-                if not input_is_multi_cols:
+                if use_sparse_array:
+                    data = _read_csr_matrix_from_unwrapped_spark_vec(pdf[select_cols])
+                elif not input_is_multi_cols:
                     data = np.array(list(pdf[select_cols[0]]), order=array_order)
                 else:
                     data = pdf[select_cols]
@@ -1079,10 +1619,24 @@ class _CumlModelWithColumns(_CumlModel):
         pred_col = predict_udf(struct(*select_cols))
 
         if self._is_single_pred(dataset.schema):
-            return dataset.withColumn(pred_name, pred_col)
+            output_schema_str = (
+                output_schema
+                if isinstance(output_schema, str)
+                else output_schema.simpleString()
+            )
+            if (
+                "array<float>" in output_schema_str
+                or "array<double>" in output_schema_str
+            ):
+                input_col, input_cols = self._get_input_columns()
+                if input_col is not None:
+                    input_datatype = dataset.schema[input_col].dataType
+                    if isinstance(input_datatype, VectorUDT):
+                        pred_col = array_to_vector(pred_col)
+
+            return dataset.withColumn(pred_name, pred_col).drop(*tmp_cols)
         else:
-            # Avoid same naming. `echo sparkcuml | base64` = c3BhcmtjdW1sCg==
-            pred_struct_col_name = "_prediction_struct_c3BhcmtjdW1sCg=="
+            pred_struct_col_name = f"_prediction_struct_{col_name_unique_tag}"
             dataset = dataset.withColumn(pred_struct_col_name, pred_col)
 
             # 1. Add prediction in the base class
@@ -1099,22 +1653,41 @@ class _CumlModelWithColumns(_CumlModel):
                         getattr(col(pred_struct_col_name), pred.probability)
                     ),
                 )
+            # 2a. Handle raw prediction - for algos that have it in spark but not yet supported in cuml,
+            # we duplicate probability col for interop with default raw prediction col
+            # in spark evaluators. i.e. auc works equivalently with probabilities.
+            # TBD replace with rawPredictions in individual algos as support is added
+            if self._has_raw_pred_col():
+                raw_pred_col = self.getOrDefault("rawPredictionCol")
+                if self._use_prob_as_raw_pred_col():
+                    dataset = dataset.withColumn(
+                        raw_pred_col,
+                        col(probability_col),
+                    )
+                else:
+                    # class supports raw predictions from cuml layer
+                    dataset = dataset.withColumn(
+                        raw_pred_col,
+                        array_to_vector(
+                            getattr(col(pred_struct_col_name), pred.raw_prediction)
+                        ),
+                    )
 
             # 3. Drop the unused column
             dataset = dataset.drop(pred_struct_col_name)
 
-            return dataset
+            return dataset.drop(*tmp_cols)
 
     def _out_schema(self, input_schema: StructType) -> Union[StructType, str]:
         assert self.dtype is not None
 
-        pyspark_type = dtype_to_pyspark_type(self.dtype)
-
-        schema = f"{pred.prediction} {pyspark_type}"
+        schema = f"{pred.prediction} double"
         if self._has_probability_col():
-            schema = f"{schema}, {pred.probability} array<{pyspark_type}>"
+            schema = f"{schema}, {pred.probability} array<double>"
+            if self._has_raw_pred_col() and not self._use_prob_as_raw_pred_col():
+                schema = f"{schema}, {pred.raw_prediction} array<double>"
         else:
-            schema = f"{pyspark_type}"
+            schema = f"double"
 
         return schema
 

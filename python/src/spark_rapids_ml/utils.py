@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2022-2023, NVIDIA CORPORATION.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,10 +21,14 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Set, Tuple
 if TYPE_CHECKING:
     import cudf
     import cupy as cp
+    import cupyx
 
 import numpy as np
-from pyspark import BarrierTaskContext, SparkContext, TaskContext
-from pyspark.sql import SparkSession
+import pandas as pd
+import scipy
+from pyspark import BarrierTaskContext, SparkConf, SparkContext, TaskContext
+from pyspark.sql import Column, SparkSession
+from pyspark.sql.types import ArrayType, FloatType
 
 _ArrayOrder = Literal["C", "F"]
 
@@ -52,7 +56,17 @@ def _unsupported_methods_attributes(clazz: Any) -> Set[str]:
         _unsupported_methods: List[str] = sum(
             [_method_names_from_param(k) for k in _unsupported_params], []
         )
-        return set(_unsupported_params + _unsupported_methods)
+        methods_and_functions = inspect.getmembers(
+            clazz,
+            predicate=lambda member: inspect.isfunction(member)
+            or inspect.ismethod(member),
+        )
+        _other_unsupported = [
+            entry[0]
+            for entry in methods_and_functions
+            if entry and (entry[1].__doc__) == "Unsupported."
+        ]
+        return set(_unsupported_params + _unsupported_methods + _other_unsupported)
     else:
         return set()
 
@@ -71,6 +85,13 @@ def _get_spark_session() -> SparkSession:
 def _is_local(sc: SparkContext) -> bool:
     """Whether it is Spark local mode"""
     return sc._jsc.sc().isLocal()  # type: ignore
+
+
+def _is_standalone_or_localcluster(conf: SparkConf) -> bool:
+    master = conf.get("spark.master")
+    return master is not None and (
+        master.startswith("spark://") or master.startswith("local-cluster")
+    )
 
 
 def _str_or_numerical(x: str) -> Union[str, float, int]:
@@ -116,11 +137,26 @@ def _get_gpu_id(task_context: TaskContext) -> int:
 
     if num_assigned > 1:
         logger = get_logger(_get_gpu_id)
-        logger.warn(
+        logger.warning(
             f"Task got assigned {num_assigned} GPUs but using only 1.  This could be a waste of GPU resources."
         )
 
     return gpu_id
+
+
+def _configure_memory_resource(uvm_enabled: bool = False) -> None:
+    import cupy as cp
+    import rmm
+    from rmm.allocators.cupy import rmm_cupy_allocator
+
+    if uvm_enabled:
+        if not type(rmm.mr.get_current_device_resource()) == type(
+            rmm.mr.ManagedMemoryResource()
+        ):
+            rmm.mr.set_current_device_resource(rmm.mr.ManagedMemoryResource())
+
+        if not cp.cuda.get_allocator().__name__ == rmm_cupy_allocator.__name__:
+            cp.cuda.set_allocator(rmm_cupy_allocator)
 
 
 def _get_default_params_from_func(
@@ -190,26 +226,43 @@ class PartitionDescriptor:
 
 
 def _concat_and_free(
-    array_list: Union[List["cp.ndarray"], List[np.ndarray]], order: _ArrayOrder = "F"
-) -> Union["cp.ndarray", np.ndarray]:
+    array_list: Union[
+        List["cp.ndarray"],
+        List[np.ndarray],
+        List[scipy.sparse.csr_matrix],
+        List["cupyx.scipy.sparse.csr_matrix"],
+    ],
+    order: _ArrayOrder = "F",
+) -> Union[
+    "cp.ndarray", np.ndarray, scipy.sparse.csr_matrix, "cupyx.scipy.sparse.csr_matrix"
+]:
     """
     concatenates a list of compatible numpy arrays into a 'order' ordered output array,
     in a memory efficient way.
     Note: frees list elements so do not reuse after calling.
+
+    if the type of input arrays is scipy or cupyx csr_matrix, 'order' parameter will not be used.
     """
-    import cupy as cp
+    import cupyx
 
-    array_module = cp if isinstance(array_list[0], cp.ndarray) else np
-
-    rows = sum(arr.shape[0] for arr in array_list)
-    if len(array_list[0].shape) > 1:
-        cols = array_list[0].shape[1]
-        concat_shape: Tuple[int, ...] = (rows, cols)
+    if isinstance(array_list[0], scipy.sparse.csr_matrix):
+        concated = scipy.sparse.vstack(array_list)
+    elif isinstance(array_list[0], cupyx.scipy.sparse.csr_matrix):
+        concated = cupyx.scipy.sparse.vstack(array_list)
     else:
-        concat_shape = (rows,)
-    d_type = array_list[0].dtype
-    concated = array_module.empty(shape=concat_shape, order=order, dtype=d_type)
-    array_module.concatenate(array_list, out=concated)
+        import cupy as cp
+
+        array_module = cp if isinstance(array_list[0], cp.ndarray) else np
+
+        rows = sum(arr.shape[0] for arr in array_list)
+        if len(array_list[0].shape) > 1:
+            cols = array_list[0].shape[1]
+            concat_shape: Tuple[int, ...] = (rows, cols)
+        else:
+            concat_shape = (rows,)
+        d_type = array_list[0].dtype
+        concated = array_module.empty(shape=concat_shape, order=order, dtype=d_type)
+        array_module.concatenate(array_list, out=concated)
     del array_list[:]
     return concated
 
@@ -233,18 +286,26 @@ def dtype_to_pyspark_type(dtype: Union[np.dtype, str]) -> str:
         return "double"
     elif dtype == np.int32:
         return "int"
+    elif dtype == np.int64:
+        return "long"
     elif dtype == np.int16:
         return "short"
+    elif dtype == np.int64:
+        return "long"
     else:
         raise RuntimeError("Unsupported dtype, found ", dtype)
 
 
 # similar to https://github.com/dmlc/xgboost/blob/master/python-package/xgboost/spark/utils.py
 def get_logger(
-    cls_or_callable: Union[type, Callable], level: str = "INFO"
+    cls_or_callable: Union[type, Callable, str], level: str = "INFO"
 ) -> logging.Logger:
     """Gets a logger by name, or creates and configures it for the first time."""
-    name = _get_class_or_callable_name(cls_or_callable)
+    name = (
+        cls_or_callable
+        if isinstance(cls_or_callable, str)
+        else _get_class_or_callable_name(cls_or_callable)
+    )
     logger = logging.getLogger(name)
 
     logger.setLevel(level)
@@ -437,3 +498,23 @@ def translate_trees(sc: SparkContext, impurity: str, model: Dict[str, Any]):  # 
         )
     elif "leaf_value" in model:
         return _create_leaf_node(sc, impurity, model)
+
+
+# to the XGBOOST _get_unwrap_udt_fn in https://github.com/dmlc/xgboost/blob/master/python-package/xgboost/spark/core.py
+def _get_unwrap_udt_fn() -> Callable[[Union[Column, str]], Column]:
+    try:
+        from pyspark.sql.functions import unwrap_udt  # type: ignore
+
+        return unwrap_udt
+    except ImportError:
+        pass
+
+    try:
+        from pyspark.databricks.sql.functions import unwrap_udt as databricks_unwrap_udt
+
+        return databricks_unwrap_udt
+    except ImportError as exc:
+        raise RuntimeError(
+            "Cannot import pyspark `unwrap_udt` function. Please install pyspark>=3.4 "
+            "or run on Databricks Runtime."
+        ) from exc

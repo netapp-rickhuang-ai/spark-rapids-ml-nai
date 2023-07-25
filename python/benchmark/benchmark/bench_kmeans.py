@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2022-2023, NVIDIA CORPORATION.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
 import time
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 import numpy as np
 import pandas as pd
+import pyspark.sql.functions as F
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.functions import array_to_vector, vector_to_array
 from pyspark.sql import DataFrame, SparkSession
@@ -185,7 +187,7 @@ class BenchmarkKMeans(BenchmarkBase):
                 )
             elif is_vector_col:
                 df_for_scoring = transformed_df.select(
-                    vector_to_array(col(feature_col)), output_col
+                    vector_to_array(col(feature_col)).alias(feature_col), output_col
                 )
 
             cluster_centers = gpu_model.cluster_centers_

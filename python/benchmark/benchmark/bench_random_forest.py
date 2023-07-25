@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2022-2023, NVIDIA CORPORATION.
+# Copyright (c) 2022-2024, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -106,12 +106,6 @@ class BenchmarkRandomForestClassifier(BenchmarkBase):
         _, transform_time = with_benchmark(
             f"{benchmark_string} transform:",
             lambda: df_with_preds.agg(sum(prediction_col)).collect(),
-        )
-
-        df_with_preds = df_with_preds.select(
-            col(prediction_col).cast("double").alias(prediction_col),
-            label_col,
-            col(probability_col),
         )
 
         if model.numClasses == 2:
