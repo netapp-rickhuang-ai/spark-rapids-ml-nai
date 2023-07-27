@@ -31,13 +31,15 @@ from typing import (
     Dict,
 <<<<<<< HEAD
     Generator,
+<<<<<<< HEAD
     Iterator,
 =======
     Iterable,
 >>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
+=======
+>>>>>>> f84d032 (broadcast umap model attributes (#345))
     List,
     Optional,
-    Sequence,
     Tuple,
     Type,
     Union,
@@ -45,6 +47,7 @@ from typing import (
 
 import numpy as np
 import pandas as pd
+<<<<<<< HEAD
 <<<<<<< HEAD
 from pyspark import RDD
 <<<<<<< HEAD
@@ -65,6 +68,9 @@ from pyspark.ml.param.shared import (
 from pyspark.ml.util import DefaultParamsReader, DefaultParamsWriter, MLReader, MLWriter
 >>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 =======
+=======
+import pyspark
+>>>>>>> f84d032 (broadcast umap model attributes (#345))
 from pyspark.ml.param.shared import HasFeaturesCol, HasLabelCol, HasOutputCol
 >>>>>>> caaddb3 (umap transform() and tests (#332))
 from pyspark.sql import Column, DataFrame
@@ -86,15 +92,21 @@ from pyspark.sql.types import (
 <<<<<<< HEAD
 from spark_rapids_ml.core import FitInputType, _CumlModel
 
+<<<<<<< HEAD
 from .common.cuml_context import CumlContext
 =======
 >>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
+=======
+>>>>>>> f84d032 (broadcast umap model attributes (#345))
 from .core import (
     CumlT,
     FitInputType,
     _ConstructFunc,
+<<<<<<< HEAD
     _CumlCommon,
 <<<<<<< HEAD
+=======
+>>>>>>> f84d032 (broadcast umap model attributes (#345))
     _CumlEstimatorSupervised,
     _CumlModel,
     _EvaluateFunc,
@@ -104,6 +116,7 @@ from .core import (
     transform_evaluate,
 )
 from .params import HasFeaturesCols, P, _CumlClass, _CumlParams
+<<<<<<< HEAD
 from .utils import (
     _ArrayOrder,
     _concat_and_free,
@@ -142,6 +155,9 @@ from .utils import (
 >>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
     get_logger,
 )
+=======
+from .utils import _ArrayOrder, _concat_and_free, _get_spark_session
+>>>>>>> f84d032 (broadcast umap model attributes (#345))
 
 if TYPE_CHECKING:
     import cudf
@@ -865,6 +881,7 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
         This function should match the metric used to train the UMAP embeedings.
 
     random_state : int, RandomState instance (optional, default=None)
+<<<<<<< HEAD
         If set to a non-zero value, this will ensure reproducible results during fit(). Note that transform() is
         inherently stochastic and may yield slightly varied embedding results.
 =======
@@ -872,13 +889,18 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
         with sample_fraction < 1.0 is not supported, as the KNN graph must be built on the same subset used to fit the model.
 
     random_state : int, RandomState instance (optional, default=None)
+=======
+>>>>>>> f84d032 (broadcast umap model attributes (#345))
         The seed used by the random number generator during embedding initialization and during sampling used by the
         optimizer. Unfortunately, achieving a high amount of parallelism during the optimization stage often comes at
         the expense of determinism, since many floating-point additions are being made in parallel without a deterministic
         ordering. This causes slightly different results across training sessions, even when the same seed is used for
         random number generation. Setting a random_state will enable consistency of trained embeddings, allowing for
         reproducible results to 3 digits of precision, but will do so at the expense of training time and memory usage.
+<<<<<<< HEAD
 >>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
+=======
+>>>>>>> f84d032 (broadcast umap model attributes (#345))
 
     verbose :
         Logging level.
@@ -1151,10 +1173,19 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
         del pdf_output
 >>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
 
+        spark = _get_spark_session()
+        broadcast_embeddings = spark.sparkContext.broadcast(embeddings)
+        broadcast_raw_data = spark.sparkContext.broadcast(raw_data)
+
         model = UMAPModel(
+<<<<<<< HEAD
             embedding_=embeddings,
             raw_data_=raw_data,
 <<<<<<< HEAD
+=======
+            embedding_=broadcast_embeddings,
+            raw_data_=broadcast_raw_data,
+>>>>>>> f84d032 (broadcast umap model attributes (#345))
             n_cols=len(raw_data[0]),
             dtype=type(raw_data[0][0]).__name__,
 =======
@@ -1510,6 +1541,7 @@ class UMAP(UMAPClass, _CumlEstimatorSupervised, _UMAPCumlParams):
 class UMAPModel(_CumlModel, UMAPClass, _UMAPCumlParams):
     def __init__(
         self,
+<<<<<<< HEAD
         embedding_: List[List[float]],
         raw_data_: List[List[float]],
 =======
@@ -1523,6 +1555,10 @@ class UMAPModel(_CumlModelWithColumns, UMAPClass, _UMAPCumlParams):
         ],
         sparse_fit: bool,
 >>>>>>> 34a7b3a8014355da8b11e92569a5809689a6153c
+=======
+        embedding_: Union[pyspark.broadcast.Broadcast, List[List[float]]],
+        raw_data_: Union[pyspark.broadcast.Broadcast, List[List[float]]],
+>>>>>>> f84d032 (broadcast umap model attributes (#345))
         n_cols: int,
         dtype: str,
     ) -> None:
@@ -1542,18 +1578,20 @@ class UMAPModel(_CumlModelWithColumns, UMAPClass, _UMAPCumlParams):
 
     @property
     def embedding(self) -> List[List[float]]:
-        return self.embedding_
+        if isinstance(self.embedding_, list):
+            return self.embedding_
+        return self.embedding_.value
 
     @property
     def raw_data(self) -> List[List[float]]:
-        return self.raw_data_
+        if isinstance(self.raw_data_, list):
+            return self.raw_data_
+        return self.raw_data_.value
 
     def _get_cuml_transform_func(
         self, dataset: DataFrame, category: str = transform_evaluate.transform
     ) -> Tuple[_ConstructFunc, _TransformFunc, Optional[_EvaluateFunc],]:
         cuml_alg_params = self.cuml_params
-        driver_embedding = np.array(self.embedding_, dtype=np.float32)
-        driver_raw_data = np.array(self.raw_data_, dtype=np.float32)
 
         def _construct_umap() -> CumlT:
             import cupy as cp
@@ -1563,16 +1601,19 @@ class UMAPModel(_CumlModelWithColumns, UMAPClass, _UMAPCumlParams):
 
             from .utils import cudf_to_cuml_array
 
-            if is_sparse(driver_raw_data):
-                raw_data_cuml = SparseCumlArray(driver_raw_data, convert_format=False)
+            embedding_np = np.array(self.embedding, dtype=np.float32)
+            raw_data_np = np.array(self.raw_data, dtype=np.float32)
+
+            if is_sparse(raw_data_np):
+                raw_data_cuml = SparseCumlArray(raw_data_np, convert_format=False)
             else:
                 raw_data_cuml = cudf_to_cuml_array(
-                    driver_raw_data,
+                    raw_data_np,
                     order="C",
                 )
 
             internal_model = CumlUMAP(**cuml_alg_params)
-            internal_model.embedding_ = cp.array(driver_embedding).data
+            internal_model.embedding_ = cp.array(embedding_np).data
             internal_model._raw_data = raw_data_cuml
 
             return internal_model
@@ -1961,4 +2002,15 @@ class _CumlModelReaderParquet(_CumlModelReader):
                 StructField(self.getOutputCol(), ArrayType(FloatType(), False), False),
             ]
         )
+<<<<<<< HEAD
 >>>>>>> caaddb3 (umap transform() and tests (#332))
+=======
+
+    def get_model_attributes(self) -> Optional[Dict[str, Any]]:
+        """Override parent method to bring broadcast variables to driver before JSON serialization."""
+        if not isinstance(self.embedding_, list):
+            self._model_attributes["embedding_"] = self.embedding_.value
+        if not isinstance(self.raw_data_, list):
+            self._model_attributes["raw_data_"] = self.raw_data_.value
+        return self._model_attributes
+>>>>>>> f84d032 (broadcast umap model attributes (#345))
