@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: signoff
-        uses: netapp-rickhuang-ai/spark-rapids-ml-nai/signoff-check@main
+        uses: netapp-rickhuang-ai/spark-rapids-ml-nai/signoff-check@branch-24.06
         with:
           owner: ${{ github.repository_owner }}
           repo: spark-rapids-ml-nai
