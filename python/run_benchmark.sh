@@ -34,6 +34,10 @@
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 cuda_version=${cuda_version:-11}
 
+# Set the correct Java path
+export JAVA_HOME=/Library/Java/JavaVirtualMachines/jdk-15.0.2.jdk/Contents/Home
+export PATH=$JAVA_HOME/bin:$PATH
+
 cluster_type=${1:-gpu}
 shift
 local_threads=${local_threads:-4}
@@ -65,10 +69,10 @@ num_rows=${num_rows:-5000}
 knn_num_rows=$num_rows
 num_cols=${num_cols:-3000}
 
-# for large num_rows (e.g. > 100k), set below to ./benchmark/gen_data_distributed.py and /tmp/distributed
-gen_data_script=./benchmark/gen_data.py
-#gen_data_script=./benchmark/gen_data_distributed.py
-gen_data_root=/tmp/data
+# for large num_rows (e.g. > 100k), set below to ./python/benchmark/gen_data_distributed.py and /tmp/distributed
+gen_data_script=./python/benchmark/gen_data.py
+#gen_data_script=./python/benchmark/gen_data_distributed.py
+gen_data_root=./python/benchmark/data
 
 # if num_rows=1m => output_files=50, scale linearly
 output_num_files=$(( ( $num_rows * $num_cols + 3000 * 20000 - 1 ) / ( 3000 * 20000 ) ))
@@ -145,7 +149,6 @@ if [[ "${MODE}" =~ "kmeans" ]] || [[ "${MODE}" == "all" ]]; then
             --feature_type "array" \
             --output_dir "${gen_data_root}/default/r${num_rows}_c${num_cols}_float32.parquet" \
             $common_confs
-           
     fi
 
     echo "$sep algo: kmeans $sep"
