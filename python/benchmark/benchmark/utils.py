@@ -18,6 +18,7 @@ from distutils.util import strtobool
 from time import time
 from typing import Any, Callable, Dict, List
 
+import pandas as pd
 from pyspark.sql import SparkSession
 
 

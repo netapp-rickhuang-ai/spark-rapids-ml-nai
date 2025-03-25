@@ -6,6 +6,7 @@ mypy>=1.0.0
 numpydoc
 pydata-sphinx-theme
 pylint
+pyspark
 pytest
 sphinx<6.0
 twine>=4.0.0

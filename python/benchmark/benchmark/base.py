@@ -24,10 +24,9 @@ import pandas as pd
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.functions import array_to_vector
 from pyspark.sql import DataFrame, SparkSession
+
+from benchmark.utils import WithSparkSession, to_bool, with_benchmark
 from pyspark.sql.functions import col
-
-from .utils import WithSparkSession, to_bool, with_benchmark
-
 
 class BenchmarkBase:
     """Based class for benchmarking.
